@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="18.114256mm"
+   height="20.793716mm"
+   viewBox="0 0 18.114256 20.793716"
+   version="1.1"
+   id="svg1"
+   inkscape:version="1.4.2 (f4327f4, 2025-05-13)"
+   sodipodi:docname="cad-icons-01.svg"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview1"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:document-units="mm"
+     showgrid="true"
+     inkscape:zoom="1.4142136"
+     inkscape:cx="444.06306"
+     inkscape:cy="-180.31223"
+     inkscape:window-width="2560"
+     inkscape:window-height="1476"
+     inkscape:window-x="-12"
+     inkscape:window-y="-12"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="g21-2-3-1-4-8">
+    <inkscape:grid
+       type="axonomgrid"
+       id="grid1"
+       units="mm"
+       originx="-21.253762"
+       originy="127.89688"
+       spacingx="0.99999998"
+       spacingy="1"
+       empcolor="#0099e5"
+       empopacity="0.30196078"
+       color="#0099e5"
+       opacity="0.14901961"
+       empspacing="5"
+       dotted="false"
+       gridanglex="30"
+       gridanglez="30"
+       enabled="true"
+       visible="true" />
+    <inkscape:page
+       x="0"
+       y="0"
+       width="18.114256"
+       height="20.793716"
+       id="page2"
+       margin="0"
+       bleed="0" />
+  </sodipodi:namedview>
+  <defs
+     id="defs1" />
+  <g
+     inkscape:label="Layer 1"
+     inkscape:groupmode="layer"
+     id="layer1"
+     transform="translate(-21.253763,127.89688)">
+    <g
+       id="g21-1"
+       inkscape:label="icon-cad"
+       transform="matrix(2,0,0,2,-12.99038,-172.49999)"
+       style="stroke-width:0.396875;stroke-dasharray:none">
+      <g
+         id="g20-19"
+         inkscape:label="icon"
+         style="stroke-width:0.396875;stroke-dasharray:none">
+        <path
+           style="fill:#ffffff;fill-opacity:1;stroke:#000000;stroke-width:0.396875;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-dashoffset:6.8994;stroke-opacity:1"
+           d="m 21.650635,32.499995 -4.330127,-2.5 v -4.999999 l 2.165063,1.25 v 2.499999 l 2.165064,1.25 z"
+           id="path43" />
+        <path
+           style="fill:#ffffff;fill-opacity:1;stroke:#000000;stroke-width:0.396875;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-dashoffset:6.8994;stroke-opacity:1"
+           d="m 17.320508,24.999996 4.330127,-2.500001 4.330127,2.500001 -2.165064,1.25 -2.165063,-1.25 -2.165064,1.25 z"
+           id="path44" />
+        <path
+           style="fill:#ffffff;fill-opacity:1;stroke:#000000;stroke-width:0.396875;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-dashoffset:6.8994;stroke-opacity:1"
+           d="m 23.815698,26.249996 v 2.499999 l -2.165063,1.25 v 2.5 l 4.330127,-2.5 v -4.999999 z"
+           id="path45" />
+        <path
+           style="fill:#cdcdcd;fill-opacity:1;stroke:#000000;stroke-width:0.396875;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-dashoffset:6.8994;stroke-opacity:1"
+           d="m 21.650635,24.999994 v 2.500001 l 2.165063,1.25 v -2.499999 z"
+           id="path46" />
+        <path
+           style="fill:#919191;fill-opacity:1;stroke:#000000;stroke-width:0.396875;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-dashoffset:6.8994;stroke-opacity:1"
+           d="m 21.650635,24.999996 -2.165064,1.25 v 2.499999 l 2.165064,-1.25 z"
+           id="path47" />
+        <path
+           style="fill:#ffffff;fill-opacity:1;stroke:#000000;stroke-width:0.396875;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-dashoffset:6.8994;stroke-opacity:1"
+           d="m 21.650635,27.499995 -2.165064,1.25 2.165064,1.25 2.165063,-1.25 z"
+           id="path48" />
+      </g>
+      <g
+         id="g19-0"
+         inkscape:label="box"
+         style="display:none;stroke-width:0.396875;stroke-dasharray:none">
+        <path
+           style="fill:none;stroke:#000000;stroke-width:0.396875;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:0.252924"
+           d="m 17.320507,29.999998 v -4.999999 l 4.330127,2.499999 v 5 z"
+           id="path17-0" />
+        <path
+           style="fill:none;stroke:#000000;stroke-width:0.396875;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:0.252924"
+           d="m 21.650634,32.499998 4.330127,-2.5 v -4.999999 l -4.330127,2.499999 z"
+           id="path18-3" />
+        <path
+           style="fill:none;stroke:#000000;stroke-width:0.396875;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:0.252924"
+           d="m 21.650634,22.499999 -4.330127,2.5 4.330127,2.499999 4.330127,-2.499999 z"
+           id="path19-9" />
+      </g>
+    </g>
+  </g>
+  <g
+     inkscape:groupmode="layer"
+     id="layer2"
+     inkscape:label="Layer 2"
+     style="display:none"
+     transform="translate(-21.253763,127.89688)">
+    <rect
+       style="display:inline;fill:none;fill-opacity:1;stroke:#000000;stroke-width:0.361742;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:1.08522, 1.08522;stroke-dashoffset:0;stroke-opacity:1"
+       id="rect39-7-7-9-1-2-2"
+       width="26.143656"
+       height="24.974514"
+       x="17.157612"
+       y="-130"
+       inkscape:export-filename="cad-icons\cad-icon.png"
+       inkscape:export-xdpi="140.22102"
+       inkscape:export-ydpi="140.22102" />
+  </g>
+</svg>

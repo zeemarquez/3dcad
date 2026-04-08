@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="18.643425mm"
+   height="19.322857mm"
+   viewBox="0 0 18.643425 19.322857"
+   version="1.1"
+   id="svg1"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs1" />
+  <g
+     id="layer1"
+     transform="translate(-20.989176,96.16144)">
+    <g
+       id="g21"
+       transform="matrix(2,0,0,2,-12.99038,-142.49999)"
+       style="stroke-width:0.661458;stroke-dasharray:none">
+      <g
+         id="g20"
+         style="stroke-width:0.661458;stroke-dasharray:none">
+        <path
+           style="fill:#ffffff;stroke:#000000;stroke-width:0.661458;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1"
+           d="m 17.320507,29.999998 1e-6,-1.999999 4.330126,2.5 v 1.999999 z"
+           id="path1" />
+        <path
+           style="fill:#919191;fill-opacity:1;stroke:#000000;stroke-width:0.661458;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1"
+           d="m 21.650634,30.499999 4.330127,-2.5 v 1.999999 l -4.330127,2.5 z"
+           id="path2" />
+        <path
+           style="fill:#ffffff;stroke:#000000;stroke-width:0.661458;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1"
+           d="m 17.320508,27.999999 4.330126,-2.5 4.330127,2.5 -4.330127,2.5 z"
+           id="path3" />
+        <path
+           style="fill:#ffffff;stroke:#000000;stroke-width:0.661458;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1"
+           d="m 19.052558,27.999999 v -3 l 2.598076,1.5 v 3 z"
+           id="path14" />
+        <path
+           style="fill:#ffffff;stroke:#000000;stroke-width:0.661458;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1"
+           d="m 19.052558,24.999999 2.598076,-1.5 2.598076,1.5 -2.598076,1.5 z"
+           id="path15" />
+        <path
+           style="fill:#919191;fill-opacity:1;stroke:#000000;stroke-width:0.661458;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1"
+           d="m 21.650634,26.499999 v 2.999999 l 2.598077,-1.499999 v -3 z"
+           id="path16" />
+      </g>
+      <g
+         id="g19"
+         style="display:none;stroke-width:0.661458;stroke-dasharray:none">
+        <path
+           style="fill:none;stroke:#000000;stroke-width:0.661458;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:0.252924"
+           d="m 17.320507,29.999998 v -4.999999 l 4.330127,2.499999 v 5 z"
+           id="path17" />
+        <path
+           style="fill:none;stroke:#000000;stroke-width:0.661458;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:0.252924"
+           d="m 21.650634,32.499998 4.330127,-2.5 v -4.999999 l -4.330127,2.499999 z"
+           id="path18" />
+        <path
+           style="fill:none;stroke:#000000;stroke-width:0.661458;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:0.252924"
+           d="m 21.650634,22.499999 -4.330127,2.5 4.330127,2.499999 4.330127,-2.499999 z"
+           id="path19" />
+      </g>
+    </g>
+  </g>
+  <g
+     id="layer2"
+     style="display:none"
+     transform="translate(-20.989176,96.16144)">
+    <rect
+       style="display:inline;fill:none;fill-opacity:1;stroke:#000000;stroke-width:0.180871;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:0.542611, 0.542611;stroke-dashoffset:0;stroke-opacity:1"
+       id="rect39"
+       width="13.071828"
+       height="12.487257"
+       x="-93.546898"
+       y="-10.971105"
+       transform="matrix(2,0,0,2,204.38199,-77.999995)" />
+  </g>
+</svg>
