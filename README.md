@@ -2,6 +2,8 @@
 
 Browser-based **parametric 3D CAD** in the vein of desktop modelers — parts, a feature tree, and a live **Three.js** viewport — powered by **Open CASCADE** via [**replicad**](https://replicad.xyz/) and **opencascade.js**.
 
+![3dcad — part viewport with feature tree](public/screenshot01.png)
+
 ## ✨ Stack
 
 - **React 19** + **TypeScript** + **Vite**
