@@ -1,8 +1,8 @@
-export const radiusEnergyFunc = (x0: number, y0: number, r0: number, r: number): number => {
+export const radiusEnergyFunc = (_x0: number, _y0: number, r0: number, r: number): number => {
   return (r0 - r) * (r0 - r);
 };
 
-export const radiusEnergyGrad = (x0: number, y0: number, r0: number, r: number, output: number[]): number[] => {
+export const radiusEnergyGrad = (_x0: number, _y0: number, r0: number, r: number, output: number[]): number[] => {
   const dfx0 = 0;
   const dfy0 = 0;
   const dfr0 = 2 * (r0 - r);

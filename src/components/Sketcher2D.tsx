@@ -9,7 +9,6 @@ import {
   SKETCH_REF_X_AXIS_ID,
   SKETCH_REF_Y_AXIS_ID,
 } from '../store/useSketchStore';
-import * as THREE from 'three';
 import { initCAD, isCADReady, buildSectionSketchOverlay2D } from '../lib/cadEngine';
 import { sampleArcPoints, segmentCrossesPositiveXAxis } from '../lib/sketchArcPoints';
 import {
@@ -98,11 +97,6 @@ const DIMENSION_TYPES = new Set([
   'distance',
 ]);
 
-// ──────────────────────────────────────────────────────────────────────────────
-// Cross-section: intersect solid geometries with the sketch plane
-// ──────────────────────────────────────────────────────────────────────────────
-interface Seg2D { x1: number; y1: number; x2: number; y2: number; }
-
 interface Loop2D {
   id: string;
   pts: { x: number; y: number }[];
@@ -116,37 +110,6 @@ interface LoopEdge {
   a: string;
   b: string;
   path: { x: number; y: number }[]; // includes both endpoints
-}
-
-function findClosedLoops(lines: { id: string; p1Id: string; p2Id: string }[]): string[][] {
-  const adj = new Map<string, { lineId: string; other: string }[]>();
-  for (const l of lines) {
-    if (!adj.has(l.p1Id)) adj.set(l.p1Id, []);
-    if (!adj.has(l.p2Id)) adj.set(l.p2Id, []);
-    adj.get(l.p1Id)!.push({ lineId: l.id, other: l.p2Id });
-    adj.get(l.p2Id)!.push({ lineId: l.id, other: l.p1Id });
-  }
-  const usedLines = new Set<string>();
-  const loops: string[][] = [];
-  for (const line of lines) {
-    if (usedLines.has(line.id)) continue;
-    const path: string[] = [line.p1Id];
-    let cur = line.p2Id;
-    const used = new Set<string>([line.id]);
-    while (cur !== path[0]) {
-      path.push(cur);
-      const nbrs = (adj.get(cur) ?? []).filter((n) => !used.has(n.lineId));
-      if (!nbrs.length) break;
-      const next = nbrs.find((n) => n.other === path[0]) ?? nbrs[0];
-      used.add(next.lineId);
-      cur = next.other;
-    }
-    if (cur === path[0] && path.length >= 3) {
-      for (const lid of used) usedLines.add(lid);
-      loops.push(path);
-    }
-  }
-  return loops;
 }
 
 function signedArea(pts: { x: number; y: number }[]): number {
@@ -191,109 +154,6 @@ function pointInPolygon(p: { x: number; y: number }, poly: { x: number; y: numbe
     if (intersects) inside = !inside;
   }
   return inside;
-}
-
-function planeMatrix(plane: string): THREE.Matrix4 {
-  if (plane === 'xz') {
-    return new THREE.Matrix4().set(
-      1, 0, 0, 0,
-      0, 0, 1, 0,
-      0, 1, 0, 0,
-      0, 0, 0, 1,
-    );
-  }
-  if (plane === 'yz') {
-    return new THREE.Matrix4().set(
-      0, 0, 1, 0,
-      1, 0, 0, 0,
-      0, 1, 0, 0,
-      0, 0, 0, 1,
-    );
-  }
-  return new THREE.Matrix4();
-}
-
-function buildGeos(sd: any, plane: string, height: number, reverse: boolean, symmetric: boolean, startOffset: number, planeOffset = 0): THREE.BufferGeometry[] {
-  if (!sd?.points?.length) return [];
-  const ptMap = new Map<string, { x: number; y: number }>(sd.points.map((p: any) => [p.id, p]));
-  const matrix = planeMatrix(plane);
-  const applyT = (geo: THREE.BufferGeometry, h: number) => {
-    if (symmetric) geo.translate(0, 0, -h / 2);
-    else if (reverse) geo.applyMatrix4(new THREE.Matrix4().makeScale(1, 1, -1));
-    if (startOffset) geo.translate(0, 0, startOffset);
-    if (planeOffset) geo.translate(0, 0, planeOffset);
-    geo.applyMatrix4(matrix);
-    return geo;
-  };
-  const result: THREE.BufferGeometry[] = [];
-  for (const loop of findClosedLoops(sd.lines ?? [])) {
-    const pts = loop.map((id: string) => ptMap.get(id)).filter(Boolean) as { x: number; y: number }[];
-    if (pts.length < 3) continue;
-    try {
-      const shape = new THREE.Shape(pts.map((p) => new THREE.Vector2(p.x, p.y)));
-      result.push(applyT(new THREE.ExtrudeGeometry(shape, { depth: Math.abs(height), bevelEnabled: false }), Math.abs(height)));
-    } catch { /* skip */ }
-  }
-  for (const circ of sd.circles ?? []) {
-    const c = ptMap.get(circ.centerId);
-    if (!c) continue;
-    try {
-      const shape = new THREE.Shape();
-      shape.absarc(c.x, c.y, circ.radius, 0, Math.PI * 2, false);
-      result.push(applyT(new THREE.ExtrudeGeometry(shape, { depth: Math.abs(height), bevelEnabled: false }), Math.abs(height)));
-    } catch { /* skip */ }
-  }
-  return result;
-}
-
-function crossSection(geometry: THREE.BufferGeometry, planeNormal: THREE.Vector3, planeD: number, sketchPlane: string): Seg2D[] {
-  const pos = geometry.attributes.position as THREE.BufferAttribute;
-  const idx = geometry.index;
-  const triCount = idx ? idx.count / 3 : pos.count / 3;
-  const segs: Seg2D[] = [];
-
-  const getV = (tri: number, v: number): THREE.Vector3 => {
-    const i = idx ? idx.getX(tri * 3 + v) : tri * 3 + v;
-    return new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i));
-  };
-
-  const project = (p: THREE.Vector3): { x: number; y: number } => {
-    switch (sketchPlane) {
-      case 'xz': return { x: p.x, y: p.z };
-      case 'yz': return { x: p.y, y: p.z };
-      default:   return { x: p.x, y: p.y };
-    }
-  };
-
-  for (let t = 0; t < triCount; t++) {
-    const a = getV(t, 0), b = getV(t, 1), c = getV(t, 2);
-    const da = planeNormal.dot(a) - planeD;
-    const db = planeNormal.dot(b) - planeD;
-    const dc = planeNormal.dot(c) - planeD;
-
-    const pts: THREE.Vector3[] = [];
-    if (da * db < 0) { const tt = da / (da - db); pts.push(a.clone().lerp(b, tt)); }
-    if (db * dc < 0) { const tt = db / (db - dc); pts.push(b.clone().lerp(c, tt)); }
-    if (dc * da < 0) { const tt = dc / (dc - da); pts.push(c.clone().lerp(a, tt)); }
-    if (Math.abs(da) < 1e-6) pts.push(a.clone());
-    if (Math.abs(db) < 1e-6) pts.push(b.clone());
-    if (Math.abs(dc) < 1e-6) pts.push(c.clone());
-
-    if (pts.length >= 2) {
-      const p1 = project(pts[0]), p2 = project(pts[1]);
-      const dx = p2.x - p1.x, dy = p2.y - p1.y;
-      if (dx * dx + dy * dy > 1e-10) segs.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
-    }
-  }
-  return segs;
-}
-
-function getPlaneNormalAndD(plane: string, offset = 0): { normal: THREE.Vector3; d: number } {
-  switch (plane) {
-    case 'xz': return { normal: new THREE.Vector3(0, 1, 0), d: offset };
-    case 'yz': return { normal: new THREE.Vector3(1, 0, 0), d: offset };
-    default:   return { normal: new THREE.Vector3(0, 0, 1), d: offset };
-  }
 }
 
 /** Point IDs to move when dragging a curve by its body (not a vertex). */
@@ -1898,19 +1758,6 @@ export const Sketcher2D: React.FC = () => {
         )
       : 0;
 
-  const arcTempRadius =
-    drawPts.length >= 1 && activeCommand === 'arc'
-      ? drawPts.length === 1
-        ? Math.sqrt(
-            (snappedCursor.x - drawPts[0].x) ** 2 +
-              (snappedCursor.y - drawPts[0].y) ** 2
-          )
-        : Math.sqrt(
-            (drawPts[1].x - drawPts[0].x) ** 2 +
-              (drawPts[1].y - drawPts[0].y) ** 2
-          )
-      : 0;
-
   const arcPath = useMemo(() => {
     if (activeCommand !== 'arc' || drawPts.length < 2) return '';
     const center = drawPts[0];
@@ -2192,7 +2039,6 @@ export const Sketcher2D: React.FC = () => {
     }
 
     // Build regions from even-depth loops, with immediate odd-depth children as holes
-    const byId = new Map(loops.map((l) => [l.id, l]));
     const regions: { outer: Loop2D; holes: Loop2D[]; path: string }[] = [];
     for (const l of loops) {
       const d = depth.get(l.id) ?? 0;

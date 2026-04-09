@@ -1,9 +1,9 @@
-export const verticalDistanceEnergyFunc = (x0: number, x1: number, y0: number, y1: number, l: number): number => {
+export const verticalDistanceEnergyFunc = (_x0: number, _x1: number, y0: number, y1: number, l: number): number => {
   const h = (y1 - y0) * (y1 - y0) - l * l;
   return h * h;
 };
 
-export const verticalDistanceEnergyGrad = (x0: number, x1: number, y0: number, y1: number, l: number, output: number[]): number[] => {
+export const verticalDistanceEnergyGrad = (_x0: number, _x1: number, y0: number, y1: number, l: number, output: number[]): number[] => {
   const h = (y1 - y0) * (y1 - y0) - l * l;
   
   const dhx0 = 0;

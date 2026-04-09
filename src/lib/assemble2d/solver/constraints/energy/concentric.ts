@@ -1,10 +1,10 @@
-export const concentricEnergyFunc = (x0: number, y0: number, r0: number, x1: number, y1: number, r1: number): number => {
+export const concentricEnergyFunc = (x0: number, y0: number, _r0: number, x1: number, y1: number, _r1: number): number => {
   let dx = x1 - x0;
   let dy = y1 - y0;
   return dx * dx + dy * dy;
 };
 
-export const concentricEnergyGrad = (x0: number, y0: number, r0: number, x1: number, y1: number, r1: number, output: number[]): number[] => {
+export const concentricEnergyGrad = (x0: number, y0: number, _r0: number, x1: number, y1: number, _r1: number, output: number[]): number[] => {
   output[0] = 2 * (x1 - x0) * (-1);
   output[1] = 2 * (y1 - y0) * (-1);
   output[2] = 0.0;

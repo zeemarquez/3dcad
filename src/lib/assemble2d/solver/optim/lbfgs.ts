@@ -13,7 +13,6 @@ interface LBFGSSolverResult {
 }
 
 export class SolverLBFGS {
-  private _size: number;
   private _steps: number;
 
   private _y: number[][];
@@ -40,7 +39,6 @@ export class SolverLBFGS {
 
     // save parameters
     this._steps = M;
-    this._size = N;
   }
 
   /**

@@ -34,12 +34,6 @@ const REF_XA_P2 = "__ref_xa_p2__";
 const REF_YA_P1 = "__ref_ya_p1__";
 const REF_YA_P2 = "__ref_ya_p2__";
 
-function dot(a: number[], b: number[]): number {
-  let s = 0;
-  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
-  return s;
-}
-
 function lbfgsSolve(
   x0: number[],
   energyFn: (x: number[]) => number,

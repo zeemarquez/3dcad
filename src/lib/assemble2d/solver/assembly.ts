@@ -1,6 +1,6 @@
 import VError from 'verror';
 
-import { IndexValueMap, SolverConstraint } from './constraints/interfaces';
+import type { IndexValueMap, SolverConstraint } from './constraints/interfaces';
 import { SolverLBFGS } from './optim/lbfgs';
 
 export class ConstraintSystem {

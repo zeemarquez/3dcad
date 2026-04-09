@@ -1,7 +1,7 @@
 import VError from "verror";
 
-import { Point2D } from "src/math/point2";
-import { Vector2D } from "src/math/vector2";
+import { Point2D } from "../math/point2";
+import { Vector2D } from "../math/vector2";
 import { Line2D } from "./line2";
 import {
   isOverflow,

@@ -1,6 +1,6 @@
 import opencascade from "replicad-opencascadejs/src/replicad_single.js";
 import opencascadeWasm from "replicad-opencascadejs/src/replicad_single.wasm?url";
-import { setOC, draw, drawRectangle, drawProjection, drawSingleCircle, Plane, revolution, type Shape3D } from "replicad";
+import { setOC, draw, drawRectangle, drawProjection, drawSingleCircle, Plane, revolution, type Point, type Shape3D } from "replicad";
 import type { GeometricSelectionRef, SketchFeature } from "../store/useCadStore";
 import { cross3, normalize3, getSketchPlaneBasis, worldToSketch2D } from "./sketchPlaneBasis";
 import { sampleArcPoints } from "./sketchArcPoints";
@@ -647,7 +647,7 @@ function sketchToRevolveSolids(op: RevolveFeatureInput): Shape3D[] {
       fc = sk.face();
       const sketchOrigin = revolveKernelPointToTuple(sk.defaultOrigin);
       let axisDir: [number, number, number];
-      let axisCenter: unknown = sk.defaultOrigin;
+      let axisCenter: Point = sk.defaultOrigin as Point;
       if (mode === "edge" && op.edgeAxis) {
         axisDir = normalizeVec3(op.edgeAxis.direction);
         axisCenter = closestPointOnUnitAxisLine(sketchOrigin, op.edgeAxis.midpoint, axisDir);

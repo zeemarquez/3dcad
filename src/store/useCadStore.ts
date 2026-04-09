@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import {
   applyRadiusValueToSketchGeometry,
   resolveSketchDataAfterDimensionValueChange,
+  type SketchConstraint,
   type SketchDataSnapshot,
   useSketchStore,
 } from './useSketchStore';
@@ -734,7 +735,7 @@ function applyValueToDimensionTarget(features: Feature[], dim: DimensionParamete
       c.id === target.constraintId
         ? { ...c, params: { ...(c.params ?? {}), [target.paramKey]: value } }
         : c
-    );
+    ) as SketchConstraint[];
     let nextSketchData: SketchData = { ...sketchData, constraints: updatedConstraints };
     if (target.paramKey === 'radius') {
       const cn = sketchData.constraints.find((c) => c.id === target.constraintId);

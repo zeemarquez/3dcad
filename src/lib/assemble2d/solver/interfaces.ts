@@ -20,13 +20,13 @@ type ConstraintInfo = |
   ConcentricInfo;
 
 export interface CoincidentInfo {
-  type: ConstraintType.COINCIDENT;
+  type: "coincident";
   p0: string;
   p1: string;
 }
 
 export interface ConcentricInfo {
-  type: ConstraintType.CONCENTRIC;
+  type: "concentric";
   c0: string;
   c1: string;
 }

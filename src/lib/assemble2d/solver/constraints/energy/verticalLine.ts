@@ -1,8 +1,8 @@
-export const verticalLineEnergyFunc = (x0: number, y0: number, x1: number, y1: number): number => {
+export const verticalLineEnergyFunc = (x0: number, _y0: number, x1: number, _y1: number): number => {
   return (x0 - x1) * (x0 - x1);
 };
 
-export const verticalLineEnergyGrad = (x0: number, y0: number, x1: number, y1: number, output: number[]): number[] => {
+export const verticalLineEnergyGrad = (x0: number, _y0: number, x1: number, _y1: number, output: number[]): number[] => {
   const dfx0 = 2 * (x0 - x1);
   const dfy0 = 0;
   const dfx1 = -2 * (x0 - x1);

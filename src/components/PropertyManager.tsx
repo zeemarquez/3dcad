@@ -337,7 +337,12 @@ function geoRefToPlaneAndOffset(ref: GeometricSelectionRef | null): { plane: 'xy
   return { plane: 'xy', offset: 0 };
 }
 
-function planeToRef(plane: 'xy' | 'xz' | 'yz'): GeometricSelectionRef {
+type SketchPlaneSelectionRef = Extract<
+  GeometricSelectionRef,
+  { type: 'defaultPlane' | 'face' | 'plane' }
+>;
+
+function planeToRef(plane: 'xy' | 'xz' | 'yz'): SketchPlaneSelectionRef {
   const labels: Record<string, string> = { xy: 'XY Plane', xz: 'XZ Plane', yz: 'YZ Plane' };
   return { type: 'defaultPlane', name: plane, label: labels[plane] };
 }
@@ -542,7 +547,7 @@ export const PropertyManager = () => {
     sketchPlanePickCommitLockRef.current = true;
     try {
       const { plane, offset } = geoRefToPlaneAndOffset(planeRef);
-      const planeRefStored = isPlaneRef(planeRef) ? planeRef : planeToRef(plane);
+      const planeRefStored: SketchPlaneSelectionRef = isPlaneRef(planeRef) ? planeRef : planeToRef(plane);
       const planeOffset = planeRefStored.type === 'face' || planeRefStored.type === 'plane' ? 0 : offset;
       const id = `f${Date.now()}`;
       const name = `${formatCommandLabel('sketch')} ${state.features.length + 1}`;

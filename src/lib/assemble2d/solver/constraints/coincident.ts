@@ -2,7 +2,7 @@ import VError from "verror";
 
 import { SolverPoint } from "../entities";
 import { coincidentEnergyFunc, coincidentEnergyGrad } from "./energy/coincident";
-import { SolverConstraint, IndexValueMap } from "./interfaces";
+import type { SolverConstraint, IndexValueMap } from "./interfaces";
 
 export class CoincidentConstraint implements SolverConstraint {
   private _p0: SolverPoint;
