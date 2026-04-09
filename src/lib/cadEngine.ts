@@ -1,8 +1,8 @@
 import opencascade from "replicad-opencascadejs/src/replicad_single.js";
 import opencascadeWasm from "replicad-opencascadejs/src/replicad_single.wasm?url";
 import { setOC, draw, drawCircle, drawRectangle, drawProjection, Plane, type Shape3D } from "replicad";
-import type { GeometricSelectionRef } from "../store/useCadStore";
-import { cross3, normalize3 } from "./sketchPlaneBasis";
+import type { GeometricSelectionRef, SketchFeature } from "../store/useCadStore";
+import { cross3, normalize3, getSketchPlaneBasis, worldToSketch2D } from "./sketchPlaneBasis";
 import type { ShapeMesh } from "replicad";
 
 let _ready = false;
@@ -740,58 +740,161 @@ export function buildPreviewDifferenceSolids(
   return out;
 }
 
-export function buildSectionTriangles2D(
+
+export interface SectionSketchOverlay2D {
+  triangles: { x1: number; y1: number; x2: number; y2: number; x3: number; y3: number }[];
+  edgeSegments: { x1: number; y1: number; x2: number; y2: number }[];
+}
+
+/**
+ * Silhouette projection of solid bodies onto the sketch plane.
+ *
+ * Strategy (rethought from scratch):
+ *   1. Tessellate each solid with the CAD mesh.
+ *   2. For every triangle compute the face normal and its dot with the sketch
+ *      plane normal (= the view direction for an orthographic camera positioned
+ *      above the plane).
+ *   3. FILL  – project only front-facing triangles (dot > 0) onto the 2D sketch
+ *      plane.  This gives the exact orthographic silhouette shadow without any
+ *      boolean slab operation.
+ *   4. EDGES – build per-mesh-edge adjacency and emit:
+ *        • Silhouette edges   – shared by one front-face and one back-face tri.
+ *        • Boundary edges     – owned by exactly one front-face tri (open mesh
+ *          boundary that faces the viewer, e.g. the rim of a cut feature).
+ *        • Sharp feature edges – both neighbours are front-facing but the angle
+ *          between their normals exceeds SHARP_ANGLE_DEG (avoids drawing every
+ *          tessellation seam on smooth curved surfaces).
+ */
+export function buildSectionSketchOverlay2D(
   features: FeatureInput[],
-  sketchPlane: "xy" | "xz" | "yz",
-  sketchOffset: number,
-): { x1: number; y1: number; x2: number; y2: number; x3: number; y3: number }[] {
-  if (!_ready) return [];
+  activeSketch: SketchFeature,
+): SectionSketchOverlay2D {
+  const empty: SectionSketchOverlay2D = { triangles: [], edgeSegments: [] };
+  if (!_ready) return empty;
   const accumShapes = buildAccumShapes(features);
-  if (!accumShapes.length) return [];
+  if (!accumShapes.length) return empty;
 
-  const proj = (x: number, y: number, z: number): { x: number; y: number } => {
-    if (sketchPlane === "xz") return { x, y: z };
-    if (sketchPlane === "yz") return { x: y, y: z };
-    return { x, y };
-  };
+  const basis = getSketchPlaneBasis(activeSketch);
+  const [nx, ny, nz] = basis.n; // sketch plane normal = orthographic view direction
 
-  // Thin slab around sketch plane. Intersections against this slab are B-Rep booleans.
-  const slabThickness = 0.05;
-  const slabSize = 20000;
-  const kernelOffset = kernelPlaneOffset(sketchPlane, sketchOffset);
-  let slab: Shape3D;
-  if (sketchPlane === "xy") {
-    slab = drawRectangle(slabSize, slabSize).sketchOnPlane("XY", kernelOffset - slabThickness / 2).extrude(slabThickness) as Shape3D;
-  } else if (sketchPlane === "xz") {
-    slab = drawRectangle(slabSize, slabSize).sketchOnPlane("XZ", kernelOffset - slabThickness / 2).extrude(slabThickness) as Shape3D;
-  } else {
-    slab = drawRectangle(slabSize, slabSize).sketchOnPlane("YZ", kernelOffset - slabThickness / 2).extrude(slabThickness) as Shape3D;
-  }
+  const tris2d: SectionSketchOverlay2D["triangles"] = [];
+  const edgeSegments: SectionSketchOverlay2D["edgeSegments"] = [];
 
-  const tris2d: { x1: number; y1: number; x2: number; y2: number; x3: number; y3: number }[] = [];
+  // cos(θ) threshold for "sharp" feature edges between two front-facing triangles.
+  // Smooth tessellation seams on cylinders/fillets stay well below this angle.
+  const SHARP_EDGE_COS = Math.cos((35 * Math.PI) / 180);
 
   for (const item of accumShapes) {
     try {
-      const slice = item.shape.intersect(slab) as Shape3D;
-      const m = slice.mesh({ tolerance: 0.08, angularTolerance: 0.08 });
+      // Moderate tolerance – good silhouette quality without excessive triangle count.
+      const m = item.shape.mesh({ tolerance: 0.04, angularTolerance: 0.4 });
       if (!m.vertices?.length || !m.triangles?.length) continue;
-      const v = m.vertices;
-      const t = m.triangles;
-      for (let i = 0; i + 2 < t.length; i += 3) {
-        const i1 = t[i] * 3, i2 = t[i + 1] * 3, i3 = t[i + 2] * 3;
-        const p1 = proj(v[i1], v[i1 + 1], v[i1 + 2]);
-        const p2 = proj(v[i2], v[i2 + 1], v[i2 + 2]);
-        const p3 = proj(v[i3], v[i3 + 1], v[i3 + 2]);
-        const a = Math.abs((p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x));
-        if (a < 1e-10) continue;
+
+      const verts = m.vertices;   // flat Float32Array: [x0,y0,z0, x1,y1,z1, ...]
+      const tris  = m.triangles;  // flat array: [v0,v1,v2, v0,v1,v2, ...]
+      const nTris = Math.floor(tris.length / 3);
+
+      // Compute unit face normal and dot-with-view for every triangle.
+      const faceNx  = new Float64Array(nTris);
+      const faceNy  = new Float64Array(nTris);
+      const faceNz  = new Float64Array(nTris);
+      const faceDot = new Float64Array(nTris);
+
+      for (let i = 0; i < nTris; i++) {
+        const i1 = tris[i * 3]     * 3;
+        const i2 = tris[i * 3 + 1] * 3;
+        const i3 = tris[i * 3 + 2] * 3;
+        // Edge vectors
+        const ax = verts[i2]     - verts[i1],     ay = verts[i2 + 1] - verts[i1 + 1], az = verts[i2 + 2] - verts[i1 + 2];
+        const bx = verts[i3]     - verts[i1],     by = verts[i3 + 1] - verts[i1 + 1], bz = verts[i3 + 2] - verts[i1 + 2];
+        // Cross product = face normal
+        let fnx = ay * bz - az * by;
+        let fny = az * bx - ax * bz;
+        let fnz = ax * by - ay * bx;
+        const len = Math.hypot(fnx, fny, fnz);
+        if (len > 1e-12) { fnx /= len; fny /= len; fnz /= len; }
+        faceNx[i] = fnx; faceNy[i] = fny; faceNz[i] = fnz;
+        faceDot[i] = fnx * nx + fny * ny + fnz * nz;
+      }
+
+      // ── FILL: project front-facing triangles ──────────────────────────────
+      for (let i = 0; i < nTris; i++) {
+        if (faceDot[i] <= 0) continue;
+        const i1 = tris[i * 3]     * 3;
+        const i2 = tris[i * 3 + 1] * 3;
+        const i3 = tris[i * 3 + 2] * 3;
+        const p1 = worldToSketch2D(activeSketch, verts[i1], verts[i1 + 1], verts[i1 + 2]);
+        const p2 = worldToSketch2D(activeSketch, verts[i2], verts[i2 + 1], verts[i2 + 2]);
+        const p3 = worldToSketch2D(activeSketch, verts[i3], verts[i3 + 1], verts[i3 + 2]);
+        const area = Math.abs((p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x));
+        if (area < 1e-10) continue; // degenerate projected triangle
         tris2d.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, x3: p3.x, y3: p3.y });
       }
+
+      // ── EDGES: silhouette + visible feature edges ─────────────────────────
+      // Build map: "minVIdx_maxVIdx" → list of triangle indices sharing that edge.
+      const edgeToTris = new Map<string, number[]>();
+      for (let i = 0; i < nTris; i++) {
+        const v0 = tris[i * 3], v1 = tris[i * 3 + 1], v2 = tris[i * 3 + 2];
+        const pairs: [number, number][] = [[v0, v1], [v1, v2], [v2, v0]];
+        for (const [a, b] of pairs) {
+          const key = a < b ? `${a}_${b}` : `${b}_${a}`;
+          const arr = edgeToTris.get(key);
+          if (arr) arr.push(i);
+          else edgeToTris.set(key, [i]);
+        }
+      }
+
+      for (const [key, triList] of edgeToTris) {
+        const us = key.indexOf('_');
+        const aVIdx = parseInt(key.slice(0, us));
+        const bVIdx = parseInt(key.slice(us + 1));
+
+        let drawEdge = false;
+
+        if (triList.length === 1) {
+          // Boundary (open mesh edge): draw when the single face is front-facing.
+          drawEdge = faceDot[triList[0]] > 0;
+        } else {
+          const front0 = faceDot[triList[0]] > 0;
+          const front1 = faceDot[triList[1]] > 0;
+          if (front0 !== front1) {
+            // Silhouette: one side faces viewer, other side faces away.
+            drawEdge = true;
+          } else if (front0) {
+            // Both front-facing: draw only if the dihedral angle is sharp enough
+            // to represent a real feature edge (not a smooth tessellation seam).
+            const dotN =
+              faceNx[triList[0]] * faceNx[triList[1]] +
+              faceNy[triList[0]] * faceNy[triList[1]] +
+              faceNz[triList[0]] * faceNz[triList[1]];
+            drawEdge = dotN < SHARP_EDGE_COS;
+          }
+        }
+
+        if (!drawEdge) continue;
+
+        const va = aVIdx * 3, vb = bVIdx * 3;
+        const p1 = worldToSketch2D(activeSketch, verts[va],     verts[va + 1], verts[va + 2]);
+        const p2 = worldToSketch2D(activeSketch, verts[vb],     verts[vb + 1], verts[vb + 2]);
+        if (Math.hypot(p2.x - p1.x, p2.y - p1.y) > 1e-7) {
+          edgeSegments.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y });
+        }
+      }
     } catch {
-      // ignore shape-specific section failures
+      /* skip this body – geometry error should not crash the sketch view */
     }
   }
 
-  return tris2d;
+  return { triangles: tris2d, edgeSegments };
+}
+
+/** @deprecated Prefer {@link buildSectionSketchOverlay2D} when edges are needed */
+export function buildSectionTriangles2D(
+  features: FeatureInput[],
+  activeSketch: SketchFeature,
+): { x1: number; y1: number; x2: number; y2: number; x3: number; y3: number }[] {
+  return buildSectionSketchOverlay2D(features, activeSketch).triangles;
 }
 
 export function buildSectionPaths2D(

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { useCadStore, type SketchFeature, type ExtrudeFeature, type CutFeature } from '../store/useCadStore';
+import { useCadStore, type SketchFeature } from '../store/useCadStore';
 import {
   useSketchStore,
   type SelectionItem,
@@ -7,7 +7,8 @@ import {
   SKETCH_REF_Y_AXIS_ID,
 } from '../store/useSketchStore';
 import * as THREE from 'three';
-import { initCAD, isCADReady, buildSectionTriangles2D, type FeatureInput } from '../lib/cadEngine';
+import { initCAD, isCADReady, buildSectionSketchOverlay2D } from '../lib/cadEngine';
+import { featuresToCadFeatureInputs } from '../lib/cadFeatureInputs';
 import {
   solveConstraints,
   type SolverPoint,
@@ -55,6 +56,9 @@ function evaluateInputExpression(
 
 const COLORS = {
   bg: '#f8fafc',
+  /** Existing solid bodies ∩ sketch plane — drawn behind grid/entities */
+  solidSection: '#ede9fe',
+  solidSectionEdge: '#a78bfa',
   grid: '#d4d4d8',
   gridMajor: '#a1a1aa',
   axisX: '#ef4444',
@@ -1608,64 +1612,43 @@ export const Sketcher2D: React.FC = () => {
   const [crossSectionTris, setCrossSectionTris] = useState<
     { x1: number; y1: number; x2: number; y2: number; x3: number; y3: number }[]
   >([]);
+  const [crossSectionEdges, setCrossSectionEdges] = useState<
+    { x1: number; y1: number; x2: number; y2: number }[]
+  >([]);
 
   // B-Rep-based background section: intersect solids with sketch plane (thin slab).
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
       if (!activeSketchId) {
-        if (!cancelled) { setCrossSectionTris([]); }
+        if (!cancelled) {
+          setCrossSectionTris([]);
+          setCrossSectionEdges([]);
+        }
         return;
       }
       if (!isCADReady()) {
         try { await initCAD(); } catch { /* ignore */ }
       }
+      if (!isCADReady()) {
+        if (!cancelled) {
+          setCrossSectionTris([]);
+          setCrossSectionEdges([]);
+        }
+        return;
+      }
       const activeSketch = features.find((f) => f.id === activeSketchId) as SketchFeature | undefined;
       if (!activeSketch) {
-        if (!cancelled) { setCrossSectionTris([]); }
+        if (!cancelled) {
+          setCrossSectionTris([]);
+          setCrossSectionEdges([]);
+        }
         return;
       }
-      const sketchMap = new Map<string, SketchFeature>(
-        features.filter((f): f is SketchFeature => f.type === 'sketch').map((f) => [f.id, f]),
-      );
-      const featureInputs: FeatureInput[] = [];
-      for (const feat of features) {
-        if (feat.type !== 'extrude' && feat.type !== 'cut') continue;
-        const ef = feat as ExtrudeFeature | CutFeature;
-        const height = Math.max(
-          Number(feat.type === 'extrude' ? (ef as ExtrudeFeature).parameters.height : (ef as CutFeature).parameters.depth) || 10,
-          0.001,
-        );
-        const sketch = sketchMap.get(ef.parameters.sketchId);
-        const sd = sketch?.parameters?.sketchData;
-        if (!sd) continue;
-        const sPlane = sketch?.parameters?.plane ?? 'xy';
-        const sOff = Number(sketch?.parameters?.planeOffset) || 0;
-        const planeRef = sketch?.parameters?.planeRef ?? null;
-        const { reverse, symmetric, startOffset } = ef.parameters;
-        featureInputs.push({
-          id: feat.id,
-          name: feat.name,
-          type: feat.type as 'extrude' | 'cut',
-          sketchData: sd as any,
-          plane: sPlane,
-          height,
-          reverse: !!reverse,
-          symmetric: !!symmetric,
-          startOffset: Number(startOffset) || 0,
-          planeOffset: sOff,
-          planeRef,
-        });
-      }
-      if (activeSketch.parameters.planeRef?.type === 'face') {
-        if (!cancelled) setCrossSectionTris([]);
-        return;
-      }
-      const skPlane = activeSketch.parameters.plane;
-      const skOff = Number(activeSketch.parameters.planeOffset) || 0;
-      const tris = buildSectionTriangles2D(featureInputs, skPlane, skOff);
+      const overlay = buildSectionSketchOverlay2D(featuresToCadFeatureInputs(features), activeSketch);
       if (cancelled) return;
-      setCrossSectionTris(tris);
+      setCrossSectionTris(overlay.triangles);
+      setCrossSectionEdges(overlay.edgeSegments);
     };
     run();
     return () => { cancelled = true; };
@@ -1863,6 +1846,17 @@ export const Sketcher2D: React.FC = () => {
       >
         {/* World-space group (Y flipped) */}
         <g transform={transform}>
+          {/* Solid body ∩ sketch plane — behind grid and sketch entities */}
+          {crossSectionTris.map((t, i) => (
+            <polygon
+              key={`xst${i}`}
+              points={`${t.x1},${t.y1} ${t.x2},${t.y2} ${t.x3},${t.y3}`}
+              fill={COLORS.solidSection}
+              fillOpacity={0.88}
+              stroke="none"
+            />
+          ))}
+
           {/* Minor grid */}
           {gridLinesV.map((x) => (
             <line
@@ -1887,6 +1881,21 @@ export const Sketcher2D: React.FC = () => {
           />
         ))}
 
+          {/* Solid section edges (B-Rep edges projected to sketch plane) */}
+          {crossSectionEdges.map((e, i) => (
+            <line
+              key={`xse${i}`}
+              x1={e.x1}
+              y1={e.y1}
+              x2={e.x2}
+              y2={e.y2}
+              stroke={COLORS.solidSectionEdge}
+              strokeWidth={1.25 * invScale}
+              strokeLinecap="round"
+              pointerEvents="none"
+            />
+          ))}
+
           {/* Axes */}
           <line
             x1={worldLeft}
@@ -1906,17 +1915,6 @@ export const Sketcher2D: React.FC = () => {
             strokeWidth={(isSelected('line', SKETCH_REF_Y_AXIS_ID) ? 2.5 : 1.5) * invScale}
             opacity={0.6}
           />
-
-          {/* Cross-section of existing solids with sketch plane */}
-          {crossSectionTris.map((t, i) => (
-            <polygon
-              key={`xst${i}`}
-              points={`${t.x1},${t.y1} ${t.x2},${t.y2} ${t.x3},${t.y3}`}
-              fill="#9ca3af"
-              fillOpacity={0.26}
-              stroke="none"
-            />
-          ))}
 
           {/* Filled sketch regions (closed loops with nested holes) */}
           {sketchRegions.map((r, i) => (

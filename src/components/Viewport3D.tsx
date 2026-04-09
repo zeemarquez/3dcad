@@ -5,13 +5,9 @@ import {
   useCadStore,
   type GeometricSelectionRef,
   type SketchFeature,
-  type ExtrudeFeature,
-  type CutFeature,
   type AxisFeature,
   type PlaneFeature,
   type PointFeature,
-  type FilletFeature,
-  type ChamferFeature,
 } from '../store/useCadStore';
 import * as THREE from 'three';
 import {
@@ -20,8 +16,8 @@ import {
   buildAllSolids,
   buildPreviewDifferenceSolids,
   type SolidMeshData,
-  type FeatureInput,
 } from '../lib/cadEngine';
+import { featuresToCadFeatureInputs } from '../lib/cadFeatureInputs';
 import { getSketchPlaneBasis, sketch2DToWorld } from '../lib/sketchPlaneBasis';
 import {
   usePartViewportMode,
@@ -35,20 +31,60 @@ const C_SEL      = '#f59e0b';
 const C_EDGE     = '#334155';
 const C_EDGE_HOV = '#38bdf8';
 
-const MID_EPS = 2e-4;
+/** Max midpoint distance (model units) between stored ref and mesh edge — allows tessellation drift */
+const EDGE_PREFETCH_MID_MAX = 0.04;
+/** Direction vectors must be parallel (same line), |dot| ≥ this */
+const EDGE_PREFETCH_DIR_DOT_MIN = 0.98;
 
-function edgeRefMatchesMeshEdge(
+/** Whether a mesh edge is a plausible match for a stored edge ref (parallel + same feature). */
+function edgeRefCouldMatchMeshEdge(
   ref: Extract<GeometricSelectionRef, { type: 'edge' }>,
   solidFeatureId: string,
   edge: BRepEdge,
 ): boolean {
   if (ref.featureId !== solidFeatureId) return false;
-  const d = Math.hypot(
-    ref.midpoint[0] - edge.mid[0],
-    ref.midpoint[1] - edge.mid[1],
-    ref.midpoint[2] - edge.mid[2],
-  );
-  return d < MID_EPS;
+  const rdx = ref.direction[0];
+  const rdy = ref.direction[1];
+  const rdz = ref.direction[2];
+  const rlen = Math.hypot(rdx, rdy, rdz);
+  const edx = edge.dir[0];
+  const edy = edge.dir[1];
+  const edz = edge.dir[2];
+  const elen = Math.hypot(edx, edy, edz);
+  if (rlen < 1e-12 || elen < 1e-12) return false;
+  const dot = Math.abs((rdx * edx + rdy * edy + rdz * edz) / (rlen * elen));
+  if (dot < EDGE_PREFETCH_DIR_DOT_MIN) return false;
+  return true;
+}
+
+function midpointDistSqToEdge(
+  ref: Extract<GeometricSelectionRef, { type: 'edge' }>,
+  edge: BRepEdge,
+): number {
+  const dx = ref.midpoint[0] - edge.mid[0];
+  const dy = ref.midpoint[1] - edge.mid[1];
+  const dz = ref.midpoint[2] - edge.mid[2];
+  return dx * dx + dy * dy + dz * dz;
+}
+
+/** One stored ref → at most one mesh edge id (closest midpoint among direction/bbox candidates). */
+function bestMeshEdgeIdForRef(
+  ref: Extract<GeometricSelectionRef, { type: 'edge' }>,
+  solidFeatureId: string,
+  edges: BRepEdge[],
+): number | null {
+  let bestId: number | null = null;
+  let bestDistSq = Infinity;
+  const maxSq = EDGE_PREFETCH_MID_MAX * EDGE_PREFETCH_MID_MAX;
+  for (const edge of edges) {
+    if (!edgeRefCouldMatchMeshEdge(ref, solidFeatureId, edge)) continue;
+    const dsq = midpointDistSqToEdge(ref, edge);
+    if (dsq < bestDistSq && dsq <= maxSq) {
+      bestDistSq = dsq;
+      bestId = edge.id;
+    }
+  }
+  return bestId;
 }
 
 function faceRefMatchesMeshFace(
@@ -447,10 +483,10 @@ const SolidMesh: React.FC<SolidMeshProps> = ({
   const preselectedEdgeIds = useMemo(() => {
     const ids = new Set<number>();
     if (!preselectedRefs || !allowEdgeSelection) return ids;
-    for (const edge of edges) {
-      for (const r of preselectedRefs) {
-        if (r.type === 'edge' && edgeRefMatchesMeshEdge(r, solidData.featureId, edge)) ids.add(edge.id);
-      }
+    for (const r of preselectedRefs) {
+      if (r.type !== 'edge') continue;
+      const id = bestMeshEdgeIdForRef(r, solidData.featureId, edges);
+      if (id !== null) ids.add(id);
     }
     return ids;
   }, [preselectedRefs, edges, allowEdgeSelection, solidData.featureId]);
@@ -584,66 +620,7 @@ const CADSolids = () => {
   const [previewSolids, setPreviewSolids] = useState<SolidMeshData[]>([]);
   const [previewColor, setPreviewColor] = useState<string>('#86efac');
 
-  const toFeatureInputs = useCallback((sourceFeatures: typeof features): FeatureInput[] => {
-    const sketchMap = new Map<string, SketchFeature>(
-      sourceFeatures
-        .filter((f): f is SketchFeature => f.type === 'sketch' && f.enabled !== false)
-        .map((f) => [f.id, f]),
-    );
-    const featureInputs: FeatureInput[] = [];
-    for (const feature of sourceFeatures) {
-      if (feature.enabled === false) continue;
-      if (feature.type === 'extrude' || feature.type === 'cut') {
-        const ef = feature as ExtrudeFeature | CutFeature;
-        const height = Math.max(
-          Number(
-            feature.type === 'extrude'
-              ? (ef as ExtrudeFeature).parameters.height
-              : (ef as CutFeature).parameters.depth,
-          ) || 10,
-          0.001,
-        );
-        const sketch = sketchMap.get(ef.parameters.sketchId);
-        const sd = sketch?.parameters?.sketchData;
-        if (!sd) continue;
-        const plane = sketch?.parameters?.plane ?? 'xy';
-        const sketchOffset = Number(sketch?.parameters?.planeOffset) || 0;
-        const planeRef = sketch?.parameters?.planeRef ?? null;
-        const { reverse, symmetric, startOffset } = ef.parameters;
-
-        featureInputs.push({
-          id: feature.id,
-          name: feature.name,
-          type: feature.type as 'extrude' | 'cut',
-          sketchData: sd as any,
-          plane,
-          height,
-          reverse: !!reverse,
-          symmetric: !!symmetric,
-          startOffset: Number(startOffset) || 0,
-          planeOffset: sketchOffset,
-          planeRef,
-        });
-      } else if (feature.type === 'fillet' || feature.type === 'chamfer') {
-        const bf = feature as FilletFeature | ChamferFeature;
-        featureInputs.push({
-          id: feature.id,
-          name: feature.name,
-          type: feature.type,
-          targetFeatureId: bf.parameters.targetFeatureId,
-          value: Math.max(
-            Number(feature.type === 'fillet' ? (bf as FilletFeature).parameters.radius : (bf as ChamferFeature).parameters.distance) || 1,
-            0.001,
-          ),
-          selectedEdgeMidpoints: (bf.parameters.edges ?? []).map((e) => e.midpoint),
-          selectedEdgeBoxes: (bf.parameters.edges ?? []).map((e) =>
-            e.bbox ?? { min: e.midpoint, max: e.midpoint }
-          ),
-        });
-      }
-    }
-    return featureInputs;
-  }, []);
+  const toFeatureInputs = useCallback((sourceFeatures: typeof features) => featuresToCadFeatureInputs(sourceFeatures), []);
 
   useEffect(() => {
     if (!cadReady) {

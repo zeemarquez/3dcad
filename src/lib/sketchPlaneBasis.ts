@@ -28,10 +28,11 @@ export interface SketchPlaneBasis {
 function defaultBasis(plane: 'xy' | 'xz' | 'yz', off: number): SketchPlaneBasis {
   switch (plane) {
     case 'xz':
+      // Must match replicad `Plane`: yDir = normal × xDir = [0,1,0]×[1,0,0] → −Z sketch Y.
       return {
         origin: [0, off, 0],
         u: [1, 0, 0],
-        v: [0, 0, 1],
+        v: [0, 0, -1],
         n: [0, 1, 0],
       };
     case 'yz':
@@ -92,11 +93,19 @@ export function sketch2DToWorld(sk: SketchFeature, x: number, y: number): [numbe
   ];
 }
 
+/**
+ * Orthographic projection of world point onto the sketch plane: drop component along plane normal, then take (u,v).
+ * Equivalent to dot with u,v when (u,v,n) is orthonormal; more stable if inputs drift slightly.
+ */
 export function worldToSketch2D(sk: SketchFeature, px: number, py: number, pz: number): { x: number; y: number } {
-  const { origin, u, v } = getSketchPlaneBasis(sk);
-  const dx = px - origin[0];
-  const dy = py - origin[1];
-  const dz = pz - origin[2];
+  const { origin, u, v, n } = getSketchPlaneBasis(sk);
+  let dx = px - origin[0];
+  let dy = py - origin[1];
+  let dz = pz - origin[2];
+  const dn = dx * n[0] + dy * n[1] + dz * n[2];
+  dx -= dn * n[0];
+  dy -= dn * n[1];
+  dz -= dn * n[2];
   return {
     x: dx * u[0] + dy * u[1] + dz * u[2],
     y: dx * v[0] + dy * v[1] + dz * v[2],
