@@ -22,6 +22,17 @@ export type GeometricSelectionRef =
       label: string;
     };
 
+/** Options when starting viewport geometric picking (see activateGeometricInput). */
+export interface GeometricInputOptions {
+  /** Refs to show as already selected in the viewport */
+  preselected?: GeometricSelectionRef[];
+  /**
+   * When editing a solid feature, pick against the model built from features *before* that feature.
+   * Ensures edge/face IDs match stored refs (e.g. fillet/chamfer target body).
+   */
+  pickFromBeforeFeature?: boolean;
+}
+
 export interface SketchData {
   points: { id: string; x: number; y: number }[];
   lines: { id: string; p1Id: string; p2Id: string }[];
@@ -256,7 +267,12 @@ interface CadState {
 
   /** Geometric selection system for input boxes in PropertyManager */
   activeInputField: string | null;
-  activateGeometricInput: (fieldName: string, callback: (sel: GeometricSelectionRef) => void) => void;
+  activeInputOptions: GeometricInputOptions | null;
+  activateGeometricInput: (
+    fieldName: string,
+    callback: (sel: GeometricSelectionRef) => void,
+    options?: GeometricInputOptions,
+  ) => void;
   captureGeometricSelection: (sel: GeometricSelectionRef, keepActive?: boolean) => void;
   deactivateGeometricInput: () => void;
   transientPreviewFeature: Feature | null;
@@ -849,24 +865,25 @@ export const useCadStore = create<CadState>((set, get) => {
     setCommandPreselection: (id) => set({ commandPreselection: id }),
 
     activeInputField: null,
+    activeInputOptions: null,
 
-    activateGeometricInput: (fieldName, callback) => {
+    activateGeometricInput: (fieldName, callback, options) => {
       _geoSelectionCb = callback;
-      set({ activeInputField: fieldName });
+      set({ activeInputField: fieldName, activeInputOptions: options ?? null });
     },
 
     captureGeometricSelection: (sel, keepActive = false) => {
       const cb = _geoSelectionCb;
       if (!keepActive) {
         _geoSelectionCb = null;
-        set({ activeInputField: null });
+        set({ activeInputField: null, activeInputOptions: null });
       }
       if (cb) cb(sel);
     },
 
     deactivateGeometricInput: () => {
       _geoSelectionCb = null;
-      set({ activeInputField: null });
+      set({ activeInputField: null, activeInputOptions: null });
     },
     transientPreviewFeature: null,
     setTransientPreviewFeature: (feature) => {
@@ -1039,6 +1056,7 @@ export const useCadStore = create<CadState>((set, get) => {
         activeSketchId: null,
         commandPreselection: null,
         activeInputField: null,
+        activeInputOptions: null,
         transientPreviewFeature: null,
       });
       get().evaluateFeatures();
@@ -1060,6 +1078,7 @@ export const useCadStore = create<CadState>((set, get) => {
         activeSketchId: null,
         commandPreselection: null,
         activeInputField: null,
+        activeInputOptions: null,
         transientPreviewFeature: null,
         commits: [{ id: 'initial', message: 'Initial features', timestamp: Date.now(), features }],
         userParameters: [],

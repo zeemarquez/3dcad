@@ -23,26 +23,65 @@ import {
   type FeatureInput,
 } from '../lib/cadEngine';
 import { getSketchPlaneBasis, sketch2DToWorld } from '../lib/sketchPlaneBasis';
+import {
+  usePartViewportMode,
+  type PartViewportGeometryKind,
+  type PartViewportMode,
+} from '../viewport/partViewportMode';
 
 const C_BASE     = '#bfdbfe';
 const C_FACE_HOV = '#93c5fd';
 const C_SEL      = '#f59e0b';
 const C_EDGE     = '#334155';
 const C_EDGE_HOV = '#38bdf8';
-type ActiveSelectionKind = 'any' | 'planeFace' | 'edge' | 'point' | 'sketch' | 'none';
 
-function selectionKindFromField(field: string | null): ActiveSelectionKind {
-  if (!field) return 'any';
-  if (field.endsWith('Edges')) return 'edge';
-  if (field.startsWith('sketch_')) return 'sketch';
-  if (field.toLowerCase().includes('point')) return 'point';
-  if (
-    field === 'sketchPlane' ||
-    field === 'sketchPlaneEdit' ||
-    field.includes('Plane') ||
-    field === 'planeRef'
-  ) return 'planeFace';
-  return 'any';
+const MID_EPS = 2e-4;
+
+function edgeRefMatchesMeshEdge(
+  ref: Extract<GeometricSelectionRef, { type: 'edge' }>,
+  solidFeatureId: string,
+  edge: BRepEdge,
+): boolean {
+  if (ref.featureId !== solidFeatureId) return false;
+  const d = Math.hypot(
+    ref.midpoint[0] - edge.mid[0],
+    ref.midpoint[1] - edge.mid[1],
+    ref.midpoint[2] - edge.mid[2],
+  );
+  return d < MID_EPS;
+}
+
+function faceRefMatchesMeshFace(
+  ref: Extract<GeometricSelectionRef, { type: 'face' }>,
+  solidFeatureId: string,
+  face: BRepFace,
+): boolean {
+  if (ref.featureId !== solidFeatureId) return false;
+  const fn = face.normal.clone().normalize();
+  const rn = new THREE.Vector3(ref.normal[0], ref.normal[1], ref.normal[2]).normalize();
+  if (Math.abs(fn.dot(rn)) < 0.995) return false;
+  const pos = face.geo.attributes.position as THREE.BufferAttribute;
+  const n = pos.count;
+  if (!n) return false;
+  let cx = 0, cy = 0, cz = 0;
+  for (let i = 0; i < n; i++) {
+    cx += pos.getX(i); cy += pos.getY(i); cz += pos.getZ(i);
+  }
+  cx /= n; cy /= n; cz /= n;
+  const dist = rn.x * cx + rn.y * cy + rn.z * cz;
+  return Math.abs(dist - ref.faceOffset) < 0.02;
+}
+
+function selectionHintObjectLabel(mode: PartViewportMode): string {
+  if (mode.type !== 'selection') return 'object';
+  const a = new Set(mode.allowed);
+  const all: PartViewportGeometryKind[] = ['sketch', 'face', 'edge', 'point', 'defaultPlane'];
+  if (a.size >= all.length) return 'object';
+  if (a.has('edge') && a.size === 1) return 'edge';
+  if (a.has('sketch') && a.size === 1) return 'sketch';
+  if (a.has('point') && a.size === 1) return 'point';
+  if (a.has('face') && a.has('defaultPlane') && a.size === 2) return 'plane or face';
+  return 'object';
 }
 
 function sampleArcPoints2D(
@@ -382,17 +421,50 @@ interface SolidMeshProps {
   previewColor?: string;
   ghost?: boolean;
   faded?: boolean;
+  partViewportMode: PartViewportMode;
 }
 
-const SolidMesh: React.FC<SolidMeshProps> = ({ solidData, selectable = true, preview = false, previewColor, ghost = false, faded = false }) => {
-  const { activeInputField, captureGeometricSelection, setLastGeometricSelection, selectionResetToken } = useCadStore();
-  const inSelMode = !!activeInputField;
-  const selectionKind = selectionKindFromField(activeInputField);
-  const allowFaceSelection = selectable && (!inSelMode || selectionKind === 'any' || selectionKind === 'planeFace');
-  const allowEdgeSelection = selectable && (!inSelMode || selectionKind === 'any' || selectionKind === 'edge');
+const SolidMesh: React.FC<SolidMeshProps> = ({
+  solidData,
+  selectable = true,
+  preview = false,
+  previewColor,
+  ghost = false,
+  faded = false,
+  partViewportMode,
+}) => {
+  const { captureGeometricSelection, selectionResetToken, activeInputOptions } = useCadStore();
+  const inSelectionMode = partViewportMode.type === 'selection';
+  const allowed = partViewportMode.type === 'selection' ? partViewportMode.allowed : [];
+  const allowFaceSelection = selectable && inSelectionMode && allowed.includes('face');
+  const allowEdgeSelection = selectable && inSelectionMode && allowed.includes('edge');
+  const selectionAccentHover = inSelectionMode;
 
   const faces = useMemo(() => buildFacesFromMesh(solidData), [solidData]);
   const edges = useMemo(() => buildEdgesFromMesh(solidData), [solidData]);
+
+  const preselectedRefs = activeInputOptions?.preselected;
+  const preselectedEdgeIds = useMemo(() => {
+    const ids = new Set<number>();
+    if (!preselectedRefs || !allowEdgeSelection) return ids;
+    for (const edge of edges) {
+      for (const r of preselectedRefs) {
+        if (r.type === 'edge' && edgeRefMatchesMeshEdge(r, solidData.featureId, edge)) ids.add(edge.id);
+      }
+    }
+    return ids;
+  }, [preselectedRefs, edges, allowEdgeSelection, solidData.featureId]);
+
+  const preselectedFaceGroupIds = useMemo(() => {
+    const ids = new Set<number>();
+    if (!preselectedRefs || !allowFaceSelection) return ids;
+    for (const face of faces) {
+      for (const r of preselectedRefs) {
+        if (r.type === 'face' && faceRefMatchesMeshFace(r, solidData.featureId, face)) ids.add(face.groupId);
+      }
+    }
+    return ids;
+  }, [preselectedRefs, faces, allowFaceSelection, solidData.featureId]);
 
   const [selFaceId, setSelFaceId] = useState<number | null>(null);
   const [hovEdge, setHovEdge] = useState<number | null>(null);
@@ -410,18 +482,16 @@ const SolidMesh: React.FC<SolidMeshProps> = ({ solidData, selectable = true, pre
       console.log('[CAD][FaceSelect]', {
         featureId: solidData.featureId,
         featureName: solidData.featureName,
-        inSelectionMode: inSelMode,
+        inSelectionMode,
         ref,
       });
-      if (inSelMode) {
+      if (inSelectionMode) {
         captureGeometricSelection(ref, ctrlKey);
-      } else {
-        setLastGeometricSelection(ref);
-        setSelFaceId((prev) => (prev === face.groupId ? null : face.groupId));
+        setSelFaceId(face.groupId);
         setSelEdge(null);
       }
     },
-    [inSelMode, solidData.featureId, solidData.featureName, captureGeometricSelection, setLastGeometricSelection],
+    [inSelectionMode, solidData.featureId, solidData.featureName, captureGeometricSelection],
   );
 
   const makeEdgeHandlers = useCallback(
@@ -429,33 +499,31 @@ const SolidMesh: React.FC<SolidMeshProps> = ({ solidData, selectable = true, pre
       onEnter: () => setHovEdge(edge.id),
       onLeave: () => setHovEdge(null),
       onSelect: (ctrlKey: boolean) => {
-        if (inSelMode) {
-          let minX = Infinity, minY = Infinity, minZ = Infinity;
-          let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-          for (const p of edge.points) {
-            if (p.x < minX) minX = p.x;
-            if (p.y < minY) minY = p.y;
-            if (p.z < minZ) minZ = p.z;
-            if (p.x > maxX) maxX = p.x;
-            if (p.y > maxY) maxY = p.y;
-            if (p.z > maxZ) maxZ = p.z;
-          }
-          captureGeometricSelection({
-            type: 'edge',
-            featureId: solidData.featureId,
-            featureName: solidData.featureName,
-            direction: edge.dir,
-            midpoint: edge.mid,
-            bbox: { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
-            label: `${solidData.featureName} — Edge`,
-          }, ctrlKey);
-        } else {
-          setSelEdge((prev) => (prev === edge.id ? null : edge.id));
-          setSelFaceId(null);
+        if (!inSelectionMode) return;
+        let minX = Infinity, minY = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+        for (const p of edge.points) {
+          if (p.x < minX) minX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.z < minZ) minZ = p.z;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y > maxY) maxY = p.y;
+          if (p.z > maxZ) maxZ = p.z;
         }
+        captureGeometricSelection({
+          type: 'edge',
+          featureId: solidData.featureId,
+          featureName: solidData.featureName,
+          direction: edge.dir,
+          midpoint: edge.mid,
+          bbox: { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] },
+          label: `${solidData.featureName} — Edge`,
+        }, ctrlKey);
+        setSelEdge(edge.id);
+        setSelFaceId(null);
       },
     }),
-    [inSelMode, solidData.featureId, solidData.featureName, captureGeometricSelection],
+    [inSelectionMode, solidData.featureId, solidData.featureName, captureGeometricSelection],
   );
 
   return (
@@ -466,8 +534,8 @@ const SolidMesh: React.FC<SolidMeshProps> = ({ solidData, selectable = true, pre
           face={face}
           featureId={solidData.featureId}
           featureName={solidData.featureName}
-          selected={selFaceId === face.groupId}
-          inSelMode={inSelMode}
+          selected={selFaceId === face.groupId || preselectedFaceGroupIds.has(face.groupId)}
+          inSelMode={selectionAccentHover}
           selectable={allowFaceSelection}
           preview={preview}
           previewColor={previewColor}
@@ -483,8 +551,8 @@ const SolidMesh: React.FC<SolidMeshProps> = ({ solidData, selectable = true, pre
           key={`e${edge.id}`}
           edge={edge}
           hovered={hovEdge === edge.id}
-          selected={selEdge === edge.id}
-          inSelMode={inSelMode}
+          selected={selEdge === edge.id || preselectedEdgeIds.has(edge.id)}
+          inSelMode={selectionAccentHover}
           selectable={allowEdgeSelection}
           preview={preview}
           previewColor={previewColor}
@@ -507,6 +575,9 @@ const CADSolids = () => {
   const activeCommand = useCadStore((s) => s.activeCommand);
   const transientPreviewFeature = useCadStore((s) => s.transientPreviewFeature);
   const setSolidResults = useCadStore((s) => s.setSolidResults);
+  const activeInputField = useCadStore((s) => s.activeInputField);
+  const activeInputOptions = useCadStore((s) => s.activeInputOptions);
+  const partViewportMode = usePartViewportMode();
   const [cadReady, setCadReady] = useState(isCADReady());
   const [solids, setSolids] = useState<SolidMeshData[]>([]);
   const [beforeSolids, setBeforeSolids] = useState<SolidMeshData[]>([]);
@@ -636,22 +707,68 @@ const CADSolids = () => {
 
   if (!cadReady) return null;
 
+  /** Ghost before/preview is for visualizing the edit; it replaces full solids and is not pickable. */
+  const showFeatureEditGhost =
+    (beforeSolids.length > 0 || previewSolids.length > 0) && activeInputField == null;
+
+  /** While picking (e.g. chamfer edges when editing), use the before-feature solid so edge refs match the target body. */
+  const pickFromBeforeFeature = !!activeInputOptions?.pickFromBeforeFeature;
+  const showBeforeSolidsForSelection =
+    !!activeInputField && pickFromBeforeFeature && beforeSolids.length > 0;
+
   return (
     <>
-      {beforeSolids.length > 0 || previewSolids.length > 0 ? (
+      {showFeatureEditGhost ? (
         <>
           {beforeSolids.map((sd, i) => (
             hiddenGeometryIds.includes(`${sd.featureId}:${i}`)
               ? null
-              : <SolidMesh key={`before_${sd.featureId}_${i}`} solidData={sd} selectable ghost />
+              : (
+                <SolidMesh
+                  key={`before_${sd.featureId}_${i}`}
+                  solidData={sd}
+                  selectable={false}
+                  ghost
+                  partViewportMode={partViewportMode}
+                />
+              )
           ))}
           {previewSolids.map((sd, i) => (
-            <SolidMesh key={`preview_${sd.featureId}_${i}`} solidData={sd} selectable={false} preview previewColor={previewColor} />
+            <SolidMesh
+              key={`preview_${sd.featureId}_${i}`}
+              solidData={sd}
+              selectable={false}
+              preview
+              previewColor={previewColor}
+              partViewportMode={partViewportMode}
+            />
           ))}
         </>
+      ) : showBeforeSolidsForSelection ? (
+        beforeSolids.map((sd, i) => (
+          hiddenGeometryIds.includes(`${sd.featureId}:${i}`)
+            ? null
+            : (
+              <SolidMesh
+                key={`before_sel_${sd.featureId}_${i}`}
+                solidData={sd}
+                selectable
+                partViewportMode={partViewportMode}
+              />
+            )
+        ))
       ) : (
         solids.map((sd, i) => (
-          hiddenGeometryIds.includes(`${sd.featureId}:${i}`) ? null : <SolidMesh key={`${sd.featureId}_${i}`} solidData={sd} selectable />
+          hiddenGeometryIds.includes(`${sd.featureId}:${i}`)
+            ? null
+            : (
+              <SolidMesh
+                key={`${sd.featureId}_${i}`}
+                solidData={sd}
+                selectable
+                partViewportMode={partViewportMode}
+              />
+            )
         ))
       )}
     </>
@@ -662,18 +779,24 @@ const CADSolids = () => {
 // Sketch Wireframes
 // ──────────────────────────────────────────────────────────────────────────────
 const SketchWireframes = () => {
-  const { features, activeInputField, captureGeometricSelection, selectionResetToken } = useCadStore();
+  const { features, captureGeometricSelection, selectionResetToken, activeInputOptions } = useCadStore();
   const activeSketchId = useCadStore((s) => s.activeSketchId);
   const hiddenGeometryIds = useCadStore((s) => s.hiddenGeometryIds);
-  const inSelMode = !!activeInputField;
-  const selectionKind = selectionKindFromField(activeInputField);
-  const allowSketchSelection = inSelMode && (selectionKind === 'any' || selectionKind === 'sketch');
+  const partViewportMode = usePartViewportMode();
+  const allowSketchSelection =
+    partViewportMode.type === 'selection' && partViewportMode.allowed.includes('sketch');
   const [hoveredSketchId, setHoveredSketchId] = useState<string | null>(null);
   const [selectedSketchId, setSelectedSketchId] = useState<string | null>(null);
   useEffect(() => {
     setHoveredSketchId(null);
     setSelectedSketchId(null);
   }, [selectionResetToken]);
+  useEffect(() => {
+    if (!allowSketchSelection) return;
+    const pre = activeInputOptions?.preselected;
+    const sk = pre?.find((r): r is Extract<GeometricSelectionRef, { type: 'sketch' }> => r.type === 'sketch');
+    if (sk) setSelectedSketchId(sk.featureId);
+  }, [allowSketchSelection, activeInputOptions?.preselected]);
   const wireframes = useMemo(() => {
     const results: { id: string; name: string; positions: Float32Array; fills: THREE.BufferGeometry[] }[] = [];
     for (const f of features) {
@@ -1031,11 +1154,10 @@ const AxisFeatures = () => {
 };
 
 const PointFeatures = () => {
-  const { features, hiddenGeometryIds, activeInputField, captureGeometricSelection, setLastGeometricSelection, selectionResetToken } =
-    useCadStore();
-  const inSelMode = !!activeInputField;
-  const selectionKind = selectionKindFromField(activeInputField);
-  const allowPointSelection = !inSelMode || selectionKind === 'any' || selectionKind === 'point';
+  const { features, hiddenGeometryIds, captureGeometricSelection, selectionResetToken } = useCadStore();
+  const partViewportMode = usePartViewportMode();
+  const allowPointSelection =
+    partViewportMode.type === 'selection' && partViewportMode.allowed.includes('point');
   const points = useMemo(
     () => features.filter((f): f is PointFeature => f.type === 'point' && f.enabled !== false && !hiddenGeometryIds.includes(f.id)),
     [features, hiddenGeometryIds]
@@ -1048,12 +1170,20 @@ const PointFeatures = () => {
     setSelectedPointId(null);
   }, [selectionResetToken]);
 
+  const activeInputOptions = useCadStore((s) => s.activeInputOptions);
+  useEffect(() => {
+    if (!allowPointSelection) return;
+    const pre = activeInputOptions?.preselected;
+    const pt = pre?.find((r): r is Extract<GeometricSelectionRef, { type: 'point' }> => r.type === 'point');
+    if (pt) setSelectedPointId(pt.featureId);
+  }, [allowPointSelection, activeInputOptions?.preselected]);
+
   return (
     <>
       {points.map((pf) => {
         const isHovered = hoveredPointId === pf.id;
         const isSelected = selectedPointId === pf.id;
-        const color = isSelected ? C_SEL : isHovered ? (inSelMode ? C_SEL : C_FACE_HOV) : '#eab308';
+        const color = isSelected ? C_SEL : isHovered ? C_SEL : '#eab308';
         return (
           <mesh
             key={pf.id}
@@ -1076,12 +1206,8 @@ const PointFeatures = () => {
                 position: [pf.parameters.x, pf.parameters.y, pf.parameters.z],
                 label: `${pf.name} — Point`,
               };
-              if (inSelMode) {
-                captureGeometricSelection(ref, !!(e.ctrlKey || e.shiftKey || e.metaKey));
-              } else {
-                setLastGeometricSelection(ref);
-                setSelectedPointId((prev) => (prev === pf.id ? null : pf.id));
-              }
+              captureGeometricSelection(ref, !!(e.ctrlKey || e.shiftKey || e.metaKey));
+              setSelectedPointId(pf.id);
             }}
           >
             <sphereGeometry args={[isHovered || isSelected ? 0.35 : 0.25, 24, 24]} />
@@ -1192,13 +1318,16 @@ const AXIS_LINES = [
 ];
 
 const DefaultPlanes = () => {
-  const { selectedPlane, setSelectedPlane, activeInputField, captureGeometricSelection, showOriginPlanes, hiddenGeometryIds } =
+  const { activeInputField, captureGeometricSelection, showOriginPlanes, hiddenGeometryIds, activeInputOptions } =
     useCadStore();
   const [hovPlane, setHovPlane] = useState<string | null>(null);
   const { scene } = useThree();
-  const inSelMode = !!activeInputField;
-  const selectionKind = selectionKindFromField(activeInputField);
-  const allowPlaneSelection = !inSelMode || selectionKind === 'any' || selectionKind === 'planeFace';
+  const partViewportMode = usePartViewportMode();
+  const allowDefaultPlane =
+    partViewportMode.type === 'selection' && partViewportMode.allowed.includes('defaultPlane');
+  const preselectedDefaultPlaneName = activeInputOptions?.preselected?.find(
+    (r): r is Extract<GeometricSelectionRef, { type: 'defaultPlane' }> => r.type === 'defaultPlane',
+  )?.name;
   const sketchPlanePickMode = activeInputField === 'sketchPlane' || activeInputField === 'sketchPlaneEdit';
   const selectFaceIfHit = useCallback(
     (e: any) => {
@@ -1238,7 +1367,10 @@ const DefaultPlanes = () => {
       {PLANE_CFG.map(({ name, color, rot }) => (
         (() => {
           const planeId = `origin-${name}`;
-          const planeVisible = inSelMode || (!hiddenGeometryIds.includes(planeId) && showPlanes);
+          const needsPlanesForInput =
+            partViewportMode.type === 'selection' &&
+            (allowDefaultPlane || sketchPlanePickMode);
+          const planeVisible = needsPlanesForInput || (!hiddenGeometryIds.includes(planeId) && showPlanes);
           return (
         <mesh
           key={name}
@@ -1247,30 +1379,37 @@ const DefaultPlanes = () => {
           raycast={sketchPlanePickMode ? () => null : undefined}
           onPointerDown={(e) => {
             if (sketchPlanePickMode) return;
-            if (inSelMode && allowPlaneSelection && selectFaceIfHit(e)) {
+            if (
+              partViewportMode.type === 'selection' &&
+              partViewportMode.allowed.includes('face') &&
+              selectFaceIfHit(e)
+            ) {
               e.stopPropagation();
               return;
             }
             e.stopPropagation();
-            if (inSelMode) {
-              if (!allowPlaneSelection) return;
+            if (partViewportMode.type === 'selection' && allowDefaultPlane) {
               captureGeometricSelection({
                 type: 'defaultPlane',
                 name,
                 label: `${name.toUpperCase()} Plane`,
               }, !!(e.ctrlKey || e.shiftKey || e.metaKey));
-              return;
             }
-            setSelectedPlane(name);
           }}
-          onPointerOver={() => { if (allowPlaneSelection) setHovPlane(name); }}
-          onPointerOut={() => { if (allowPlaneSelection) setHovPlane(null); }}
+          onPointerOver={() => { if (allowDefaultPlane) setHovPlane(name); }}
+          onPointerOut={() => { if (allowDefaultPlane) setHovPlane(null); }}
         >
           <planeGeometry args={[PLANE_SIZE, PLANE_SIZE]} />
           <meshBasicMaterial
-            color={selectedPlane === name || (inSelMode && allowPlaneSelection && hovPlane === name) ? '#f59e0b' : color}
+            color={
+              allowDefaultPlane && (hovPlane === name || preselectedDefaultPlaneName === name)
+                ? '#f59e0b'
+                : color
+            }
             transparent
-            opacity={inSelMode && allowPlaneSelection && hovPlane === name ? 0.4 : 0.12}
+            opacity={
+              allowDefaultPlane && (hovPlane === name || preselectedDefaultPlaneName === name) ? 0.4 : 0.12
+            }
             side={THREE.DoubleSide}
             depthWrite={false}
           />
@@ -1287,17 +1426,10 @@ const DefaultPlanes = () => {
 // ──────────────────────────────────────────────────────────────────────────────
 const SelectionHint = () => {
   const { activeInputField, activeCommand, selectedFeatureId, features, deactivateGeometricInput } = useCadStore();
+  const mode = usePartViewportMode();
   if (!activeInputField) return null;
   const selectedFeature = features.find((f) => f.id === selectedFeatureId);
-  const objectLabel = selectionKindFromField(activeInputField) === 'edge'
-    ? 'edge'
-    : selectionKindFromField(activeInputField) === 'planeFace'
-    ? 'plane or face'
-    : selectionKindFromField(activeInputField) === 'point'
-    ? 'point'
-    : selectionKindFromField(activeInputField) === 'sketch'
-    ? 'sketch'
-    : 'object';
+  const objectLabel = selectionHintObjectLabel(mode);
   const operationRaw = activeCommand ?? selectedFeature?.type ?? 'operation';
   const operationLabel = operationRaw.charAt(0).toUpperCase() + operationRaw.slice(1);
   return (

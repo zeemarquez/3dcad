@@ -217,7 +217,11 @@ const GeometricInput: React.FC<GeometricInputProps> = ({ label, value, fieldKey,
       displayText={value?.label ?? 'Click to select…'}
       fieldKey={fieldKey}
       hasValue={!!value}
-      onActivate={() => useCadStore.getState().activateGeometricInput(fieldKey, onChange)}
+      onActivate={() =>
+        useCadStore.getState().activateGeometricInput(fieldKey, onChange, {
+          preselected: value ? [value] : undefined,
+        })
+      }
     />
   );
 };
@@ -241,12 +245,27 @@ const SketchInput: React.FC<SketchInputProps> = ({ label, value, sketches, field
       displayText={found ? found.name : 'Click to select sketch…'}
       fieldKey={fieldKey}
       hasValue={!!found}
-      onActivate={() =>
-        useCadStore.getState().activateGeometricInput(fieldKey, (sel) => {
-          if (sel.type !== 'sketch') return;
-          onChange(sel.featureId);
-        })
-      }
+      onActivate={() => {
+        const pre =
+          found != null
+            ? ([
+                {
+                  type: 'sketch' as const,
+                  featureId: value,
+                  featureName: found.name,
+                  label: `${found.name} — Sketch`,
+                },
+              ] satisfies GeometricSelectionRef[])
+            : undefined;
+        useCadStore.getState().activateGeometricInput(
+          fieldKey,
+          (sel) => {
+            if (sel.type !== 'sketch') return;
+            onChange(sel.featureId);
+          },
+          { preselected: pre },
+        );
+      }}
     />
   );
 };
@@ -371,12 +390,28 @@ const PointRefInput: React.FC<PointRefInputProps> = ({ label, value, points, fie
       displayText={found ? found.name : 'Click to select point…'}
       fieldKey={fieldKey}
       hasValue={!!found}
-      onActivate={() =>
-        useCadStore.getState().activateGeometricInput(fieldKey, (sel) => {
-          if (!isPointRef(sel)) return;
-          onChange(sel.featureId);
-        })
-      }
+      onActivate={() => {
+        const pre =
+          found != null
+            ? ([
+                {
+                  type: 'point' as const,
+                  featureId: found.id,
+                  featureName: found.name,
+                  position: [found.parameters.x, found.parameters.y, found.parameters.z] as [number, number, number],
+                  label: `${found.name} — Point`,
+                },
+              ] satisfies GeometricSelectionRef[])
+            : undefined;
+        useCadStore.getState().activateGeometricInput(
+          fieldKey,
+          (sel) => {
+            if (!isPointRef(sel)) return;
+            onChange(sel.featureId);
+          },
+          { preselected: pre },
+        );
+      }}
     />
   );
 };
@@ -1452,18 +1487,32 @@ export const PropertyManager = () => {
 
     const beginEdgePicking = () => {
       setExprError('');
-      activateGeometricInput(edgeFieldKey, (sel) => {
-        if (!isEdgeRef(sel)) return;
-        const baseTarget = selectedEdges[0]?.featureId ?? currentTarget;
-        if (baseTarget && sel.featureId !== baseTarget) {
-          setExprError('All selected edges must belong to the same target feature');
-          return;
-        }
-        if (selectedEdges.some((e) => edgeEquals(e, sel))) {
-          return;
-        }
-        setEdges([...selectedEdges, sel]);
-      });
+      activateGeometricInput(
+        edgeFieldKey,
+        (sel) => {
+          if (!isEdgeRef(sel)) return;
+          const baseTarget = selectedEdges[0]?.featureId ?? currentTarget;
+          if (baseTarget && sel.featureId !== baseTarget) {
+            setExprError('All selected edges must belong to the same target feature');
+            return;
+          }
+          if (selectedEdges.some((e) => edgeEquals(e, sel))) {
+            return;
+          }
+          const nextEdges = [...selectedEdges, sel];
+          setEdges(nextEdges);
+          useCadStore.setState((s) => {
+            if (s.activeInputField !== edgeFieldKey || !s.activeInputOptions) return {};
+            return {
+              activeInputOptions: { ...s.activeInputOptions, preselected: nextEdges },
+            };
+          });
+        },
+        {
+          preselected: selectedEdges,
+          pickFromBeforeFeature: !isNew,
+        },
+      );
     };
     const currentValue = isNew
       ? String(np[valueKey] ?? 1)
@@ -1749,10 +1798,14 @@ export const PropertyManager = () => {
                     fieldKey="pointLineEdgeEdges"
                     hasValue={isEdgeRef(np.edgeRef ?? null)}
                     onActivate={() =>
-                      activateGeometricInput('pointLineEdgeEdges', (sel) => {
-                        if (!isEdgeRef(sel)) return;
-                        updateNp({ edgeRef: sel });
-                      })
+                      activateGeometricInput(
+                        'pointLineEdgeEdges',
+                        (sel) => {
+                          if (!isEdgeRef(sel)) return;
+                          updateNp({ edgeRef: sel });
+                        },
+                        { preselected: isEdgeRef(np.edgeRef ?? null) ? [np.edgeRef!] : undefined },
+                      )
                     }
                   />
                 )}
@@ -1790,10 +1843,14 @@ export const PropertyManager = () => {
                     fieldKey="pointLineAEdges"
                     hasValue={isEdgeRef(np.edgeRefA ?? null)}
                     onActivate={() =>
-                      activateGeometricInput('pointLineAEdges', (sel) => {
-                        if (!isEdgeRef(sel)) return;
-                        updateNp({ edgeRefA: sel });
-                      })
+                      activateGeometricInput(
+                        'pointLineAEdges',
+                        (sel) => {
+                          if (!isEdgeRef(sel)) return;
+                          updateNp({ edgeRefA: sel });
+                        },
+                        { preselected: isEdgeRef(np.edgeRefA ?? null) ? [np.edgeRefA!] : undefined },
+                      )
                     }
                   />
                 )}
@@ -1828,10 +1885,14 @@ export const PropertyManager = () => {
                     fieldKey="pointLineBEdges"
                     hasValue={isEdgeRef(np.edgeRefB ?? null)}
                     onActivate={() =>
-                      activateGeometricInput('pointLineBEdges', (sel) => {
-                        if (!isEdgeRef(sel)) return;
-                        updateNp({ edgeRefB: sel });
-                      })
+                      activateGeometricInput(
+                        'pointLineBEdges',
+                        (sel) => {
+                          if (!isEdgeRef(sel)) return;
+                          updateNp({ edgeRefB: sel });
+                        },
+                        { preselected: isEdgeRef(np.edgeRefB ?? null) ? [np.edgeRefB!] : undefined },
+                      )
                     }
                   />
                 )}
