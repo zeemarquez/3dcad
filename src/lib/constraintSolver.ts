@@ -42,103 +42,144 @@ function dot(a: number[], b: number[]): number {
 
 function lbfgsSolve(
   x0: number[],
-  energy: (x: number[]) => number,
-  gradient: (x: number[]) => number[],
-  maxIter = 500,
-  tol = 1e-10
-): { success: boolean; x: number[]; iterations: number; energy: number } {
+  energyFn: (x: number[]) => number,
+  gradientFn: (x: number[], out: number[]) => void,
+  maxIter = 200,
+  tol = 1e-10,
+  energyTol = 1e-8
+): { x: number[]; iterations: number; energy: number } {
   const n = x0.length;
-  if (n === 0) return { success: true, x: [], iterations: 0, energy: 0 };
+  if (n === 0) return { x: [], iterations: 0, energy: 0 };
 
   const m = 8;
-  const x = [...x0];
-  const sHist: number[][] = [];
-  const yHist: number[][] = [];
-  const rhoHist: number[] = [];
+  const x = new Array<number>(n);
+  for (let i = 0; i < n; i++) x[i] = x0[i];
 
-  let g = gradient(x);
-  let fx = energy(x);
+  // Pre-allocated ring buffer for L-BFGS history — zero allocations in the hot loop.
+  const sRing: number[][] = [];
+  const yRing: number[][] = [];
+  for (let i = 0; i < m; i++) {
+    sRing.push(new Array<number>(n));
+    yRing.push(new Array<number>(n));
+  }
+  const rhoRing = new Array<number>(m);
+  let histLen = 0;
+  let histStart = 0;
+
+  const alpha = new Array<number>(m);
+  const q = new Array<number>(n);
+  const dir = new Array<number>(n);
+  const xNew = new Array<number>(n);
+  const prevG = new Array<number>(n);
+  const g = new Array<number>(n);
+  for (let i = 0; i < n; i++) g[i] = 0;
+
+  gradientFn(x, g);
+  let fx = energyFn(x);
 
   for (let iter = 0; iter < maxIter; iter++) {
     let gNorm = 0;
     for (let i = 0; i < n; i++) gNorm += g[i] * g[i];
-    if (gNorm < tol * tol) {
-      return { success: true, x, iterations: iter, energy: fx };
+    if (gNorm < 1e-12) {
+      return { x, iterations: iter, energy: fx };
     }
 
-    const q = [...g];
-    const k = sHist.length;
-    const alpha = new Array(k);
+    for (let i = 0; i < n; i++) q[i] = g[i];
+    const k = histLen;
 
     for (let i = k - 1; i >= 0; i--) {
-      alpha[i] = rhoHist[i] * dot(sHist[i], q);
-      for (let j = 0; j < n; j++) q[j] -= alpha[i] * yHist[i][j];
+      const ri = (histStart + i) % m;
+      let d = 0;
+      const sr = sRing[ri];
+      for (let j = 0; j < n; j++) d += sr[j] * q[j];
+      alpha[i] = rhoRing[ri] * d;
+      const yr = yRing[ri];
+      for (let j = 0; j < n; j++) q[j] -= alpha[i] * yr[j];
     }
 
-    const d = [...q];
+    for (let i = 0; i < n; i++) dir[i] = q[i];
     if (k > 0) {
-      const sy = dot(sHist[k - 1], yHist[k - 1]);
-      const yy = dot(yHist[k - 1], yHist[k - 1]);
+      const lastRi = (histStart + k - 1) % m;
+      const sLast = sRing[lastRi], yLast = yRing[lastRi];
+      let sy = 0, yy = 0;
+      for (let j = 0; j < n; j++) { sy += sLast[j] * yLast[j]; yy += yLast[j] * yLast[j]; }
       if (yy > 1e-30) {
         const gamma = sy / yy;
-        for (let j = 0; j < n; j++) d[j] = q[j] * gamma;
+        for (let j = 0; j < n; j++) dir[j] = q[j] * gamma;
       }
     }
 
     for (let i = 0; i < k; i++) {
-      const beta = rhoHist[i] * dot(yHist[i], d);
-      for (let j = 0; j < n; j++) d[j] += (alpha[i] - beta) * sHist[i][j];
+      const ri = (histStart + i) % m;
+      const yr = yRing[ri];
+      let d = 0;
+      for (let j = 0; j < n; j++) d += yr[j] * dir[j];
+      const beta = rhoRing[ri] * d;
+      const sr = sRing[ri];
+      for (let j = 0; j < n; j++) dir[j] += (alpha[i] - beta) * sr[j];
     }
 
-    for (let j = 0; j < n; j++) d[j] = -d[j];
+    for (let j = 0; j < n; j++) dir[j] = -dir[j];
 
-    let gd = dot(g, d);
+    let gd = 0;
+    for (let j = 0; j < n; j++) gd += g[j] * dir[j];
     if (gd >= 0) {
-      for (let j = 0; j < n; j++) d[j] = -g[j];
-      gd = dot(g, d);
+      for (let j = 0; j < n; j++) dir[j] = -g[j];
+      gd = 0;
+      for (let j = 0; j < n; j++) gd += g[j] * dir[j];
     }
 
     let step = 1.0;
     const c1 = 1e-4;
-    const xNew = new Array(n);
-    for (let ls = 0; ls < 30; ls++) {
-      for (let j = 0; j < n; j++) xNew[j] = x[j] + step * d[j];
-      if (energy(xNew) <= fx + c1 * step * gd) break;
+    for (let ls = 0; ls < 12; ls++) {
+      for (let j = 0; j < n; j++) xNew[j] = x[j] + step * dir[j];
+      if (energyFn(xNew) <= fx + c1 * step * gd) break;
       step *= 0.5;
     }
 
-    const s = new Array(n);
-    const prevG = [...g];
+    for (let j = 0; j < n; j++) prevG[j] = g[j];
+    for (let j = 0; j < n; j++) x[j] += step * dir[j];
+
+    const newFx = energyFn(x);
+    for (let i = 0; i < n; i++) g[i] = 0;
+    gradientFn(x, g);
+
+    // Compute s = step*dir and y = g_new - g_old into temp buffers (dir/prevG are
+    // free — they won't be read again until next iteration overwrites them).
+    let sy = 0;
     for (let j = 0; j < n; j++) {
-      s[j] = step * d[j];
-      x[j] += s[j];
+      const sj = step * dir[j];
+      const yj = g[j] - prevG[j];
+      dir[j] = sj;
+      prevG[j] = yj;
+      sy += sj * yj;
     }
-
-    const newFx = energy(x);
-    g = gradient(x);
-    const y = new Array(n);
-    for (let j = 0; j < n; j++) y[j] = g[j] - prevG[j];
-
-    const sy = dot(s, y);
     if (sy > 1e-16) {
-      if (sHist.length >= m) {
-        sHist.shift();
-        yHist.shift();
-        rhoHist.shift();
-      }
-      sHist.push(s);
-      yHist.push(y);
-      rhoHist.push(1 / sy);
+      const slot = histLen < m ? histLen : histStart;
+      const sSlot = sRing[slot], ySlot = yRing[slot];
+      for (let j = 0; j < n; j++) { sSlot[j] = dir[j]; ySlot[j] = prevG[j]; }
+      rhoRing[slot] = 1 / sy;
+      if (histLen < m) histLen++;
+      else histStart = (histStart + 1) % m;
     }
 
-    if (Math.abs(newFx - fx) < tol && newFx < 1e-6) {
-      return { success: true, x, iterations: iter + 1, energy: newFx };
+    // Two termination gates:
+    // 1) Energy is near zero AND improvement stalled — clean convergence.
+    // 2) Relative improvement is negligible (stagnated at any energy level) —
+    //    the solver reached a local minimum and more iterations won't help.
+    //    Gate (2) uses a relative check to avoid premature exit on the first
+    //    slow iteration; it only fires after several tiny steps in a row.
+    if (newFx < energyTol && Math.abs(newFx - fx) < tol) {
+      return { x, iterations: iter + 1, energy: newFx };
+    }
+    if (Math.abs(newFx - fx) < tol * (1 + Math.abs(newFx))) {
+      return { x, iterations: iter + 1, energy: newFx };
     }
 
     fx = newFx;
   }
 
-  return { success: fx < 1e-4, x, iterations: maxIter, energy: fx };
+  return { x, iterations: maxIter, energy: fx };
 }
 
 type EFn = (x: number[]) => number;
@@ -568,6 +609,110 @@ function registerConstraint(
       break;
     }
 
+    case 'symmetry': {
+      const axisLine = lineById.get(entityIds[0]);
+      if (!axisLine) return;
+      const ix0 = pIdx.get(axisLine.p1Id);
+      const ix1 = pIdx.get(axisLine.p2Id);
+      if (ix0 === undefined || ix1 === undefined) return;
+
+      const idA = entityIds[1];
+      const idB = entityIds[2];
+
+      const pushSymmetricPointPair = (iA: number, iB: number) => {
+        // Use axis-length–normalized residuals. Raw cross/dot products scale with |v|²; reference
+        // axes (e.g. x-axis endpoints at ±10000) made h1,h2 ~20000× geometric error, energy ~10⁸×
+        // too large, ill-conditioning L-BFGS and breaking DoF probing (false "fully constrained").
+        // E = (h1²+h2²)/|v|² is the sum of squared perpendicular distance to the line and squared
+        // chord component along the unit axis (reflection conditions in consistent units).
+        eFns.push((x) => {
+          const x0 = x[ix0], y0 = x[ix0 + 1], x1 = x[ix1], y1 = x[ix1 + 1];
+          const xa = x[iA], ya = x[iA + 1], xb = x[iB], yb = x[iB + 1];
+          const vx = x1 - x0, vy = y1 - y0;
+          const L2 = vx * vx + vy * vy;
+          if (L2 < 1e-24) return 0;
+          const Mx = (xa + xb) / 2, My = (ya + yb) / 2;
+          const h1 = (Mx - x0) * vy - (My - y0) * vx;
+          const h2 = (xb - xa) * vx + (yb - ya) * vy;
+          return (h1 * h1 + h2 * h2) / L2;
+        });
+        gFns.push((x, g) => {
+          const x0 = x[ix0], y0 = x[ix0 + 1], x1 = x[ix1], y1 = x[ix1 + 1];
+          const xa = x[iA], ya = x[iA + 1], xb = x[iB], yb = x[iB + 1];
+          const vx = x1 - x0, vy = y1 - y0;
+          const L2 = vx * vx + vy * vy;
+          if (L2 < 1e-24) return;
+          const invL2 = 1 / L2;
+          const FoverL4 = 1 / (L2 * L2);
+          const Mx = (xa + xb) / 2, My = (ya + yb) / 2;
+          const h1 = (Mx - x0) * vy - (My - y0) * vx;
+          const h2 = (xb - xa) * vx + (yb - ya) * vy;
+          const F = h1 * h1 + h2 * h2;
+          const t1 = 2 * h1, t2 = 2 * h2;
+          // ∂(F/L2)/∂q = (1/L2)∂F/∂q − (F/L2²)∂(L2)/∂q
+          g[iA] += invL2 * (t1 * (0.5 * vy) + t2 * (-vx));
+          g[iA + 1] += invL2 * (t1 * (-0.5 * vx) + t2 * (-vy));
+          g[iB] += invL2 * (t1 * (0.5 * vy) + t2 * vx);
+          g[iB + 1] += invL2 * (t1 * (-0.5 * vx) + t2 * vy);
+          const gix0 = t1 * (-vy + (My - y0)) + t2 * (-(xb - xa));
+          const giy0 = t1 * (-(Mx - x0) + vx) + t2 * (-(yb - ya));
+          const gix1 = t1 * (-(My - y0)) + t2 * (xb - xa);
+          const giy1 = t1 * (Mx - x0) + t2 * (yb - ya);
+          g[ix0] += invL2 * gix0 + FoverL4 * F * (2 * vx);
+          g[ix0 + 1] += invL2 * giy0 + FoverL4 * F * (2 * vy);
+          g[ix1] += invL2 * gix1 - FoverL4 * F * (2 * vx);
+          g[ix1 + 1] += invL2 * giy1 - FoverL4 * F * (2 * vy);
+        });
+      };
+
+      if (pointById.has(idA) && pointById.has(idB)) {
+        const iA = pIdx.get(idA);
+        const iB = pIdx.get(idB);
+        if (iA !== undefined && iB !== undefined) pushSymmetricPointPair(iA, iB);
+        break;
+      }
+
+      const lineA = lineById.get(idA);
+      const lineB = lineById.get(idB);
+      if (lineA && lineB) {
+        // B's stored p1/p2 order may not correspond to A's (e.g. opposite edge winding).
+        // applyConstraint sets swapLineBEndpoints when (A1↔B2)+(A2↔B1) is the low-residual pairing.
+        const swapB = (params?.swapLineBEndpoints ?? 0) !== 0;
+        const bP1 = swapB ? lineB.p2Id : lineB.p1Id;
+        const bP2 = swapB ? lineB.p1Id : lineB.p2Id;
+        const a1 = pIdx.get(lineA.p1Id), a2 = pIdx.get(lineA.p2Id);
+        const b1 = pIdx.get(bP1), b2 = pIdx.get(bP2);
+        if (a1 !== undefined && a2 !== undefined && b1 !== undefined && b2 !== undefined) {
+          pushSymmetricPointPair(a1, b1);
+          pushSymmetricPointPair(a2, b2);
+        }
+        break;
+      }
+
+      const circA = circleById.get(idA);
+      const circB = circleById.get(idB);
+      if (circA && circB) {
+        const iA = pIdx.get(circA.centerId);
+        const iB = pIdx.get(circB.centerId);
+        if (iA !== undefined && iB !== undefined) pushSymmetricPointPair(iA, iB);
+        break;
+      }
+
+      const arcA = arcById.get(idA);
+      const arcB = arcById.get(idB);
+      if (arcA && arcB) {
+        const cA = pIdx.get(arcA.centerId), sA = pIdx.get(arcA.startId), eA = pIdx.get(arcA.endId);
+        const cB = pIdx.get(arcB.centerId), sB = pIdx.get(arcB.startId), eB = pIdx.get(arcB.endId);
+        if (cA !== undefined && sA !== undefined && eA !== undefined && cB !== undefined && sB !== undefined && eB !== undefined) {
+          pushSymmetricPointPair(cA, cB);
+          pushSymmetricPointPair(sA, sB);
+          pushSymmetricPointPair(eA, eB);
+        }
+        break;
+      }
+      break;
+    }
+
     case 'arcRadius': {
       const arc = arcById.get(entityIds[0]);
       if (!arc) return;
@@ -595,13 +740,21 @@ function registerConstraint(
   }
 }
 
+// Scale factor applied to constraint energy/gradient when a drag target is present.
+// This makes constraints ~10,000× stiffer than drag force so points stay precisely on
+// the constraint manifold during interactive drags.
+const DRAG_CONSTRAINT_SCALE = 1e4;
+
 export function solveConstraints(
   points: SolverPoint[],
   lines: SolverLine[],
   circles: SolverCircle[],
   arcs: SolverArc[],
   constraints: SolverConstraint[],
-  dragTarget?: DragTarget
+  dragTarget?: DragTarget,
+  maxLBFGSIter?: number,
+  /** Override constraint scale (default: DRAG_CONSTRAINT_SCALE when drag present, 1 otherwise). */
+  constraintScale?: number
 ): SolveResult {
   if (constraints.length === 0 || points.length === 0) {
     return { success: true, points, iterations: 0, energy: 0, constraintEnergy: 0, dragEnergy: 0 };
@@ -612,7 +765,6 @@ export function solveConstraints(
   const circleById = new Map(circles.map(c => [c.id, c]));
   const arcById = new Map(arcs.map(a => [a.id, a]));
 
-  // Built-in sketch references available to constraints.
   pointById.set(REF_ORIGIN_ID, { id: REF_ORIGIN_ID, x: 0, y: 0 });
   pointById.set(REF_XA_P1, { id: REF_XA_P1, x: -10000, y: 0 });
   pointById.set(REF_XA_P2, { id: REF_XA_P2, x: 10000, y: 0 });
@@ -641,6 +793,10 @@ export function solveConstraints(
     }
   }
 
+  if (dragTarget && pointById.has(dragTarget.pointId)) {
+    refPointIds.add(dragTarget.pointId);
+  }
+
   const pIds = [...refPointIds];
   const pIdx = new Map<string, number>();
   const vars: number[] = [];
@@ -663,7 +819,6 @@ export function solveConstraints(
   for (const c of constraints) {
     if (c.type === "fix" && c.entityIds[0]) fixedPointIds.add(c.entityIds[0]);
   }
-  // Keep virtual reference geometry immutable.
   for (const vpid of [REF_ORIGIN_ID, REF_XA_P1, REF_XA_P2, REF_YA_P1, REF_YA_P2]) {
     if (pIdx.has(vpid)) fixedPointIds.add(vpid);
   }
@@ -685,44 +840,57 @@ export function solveConstraints(
     registerConstraint(c, pointById, lineById, circleById, arcById, pIdx, eFns, gFns);
   }
 
-  if (eFns.length === 0) {
+  if (eFns.length === 0 && !dragTarget) {
     return { success: true, points, iterations: 0, energy: 0, constraintEnergy: 0, dragEnergy: 0 };
   }
+  if (eFns.length === 0 && dragTarget) {
+    const idx = pIdx.get(dragTarget.pointId);
+    if (idx === undefined || fixedPointIds.has(dragTarget.pointId)) {
+      return { success: true, points, iterations: 0, energy: 0, constraintEnergy: 0, dragEnergy: 0 };
+    }
+    const newPoints = points.map(p =>
+      p.id === dragTarget.pointId ? { ...p, x: dragTarget.x, y: dragTarget.y } : p
+    );
+    return { success: true, points: newPoints, iterations: 1, energy: 0, constraintEnergy: 0, dragEnergy: 0 };
+  }
 
-  const constraintOnlyEnergy = (x: number[]): number => {
+  const CSCALE = constraintScale ?? (dragTarget ? DRAG_CONSTRAINT_SCALE : 1);
+
+  const rawConstraintEnergy = (x: number[]): number => {
     let e = 0;
     for (const fn of eFns) e += fn(x);
     return e;
   };
   const dragOnlyEnergy = (x: number[]): number => {
-    let e = 0;
-    if (dragTarget && !fixedPointIds.has(dragTarget.pointId)) {
-      const idx = pIdx.get(dragTarget.pointId);
-      if (idx !== undefined) {
-        const w = dragTarget.strength ?? 0.1;
-        const dx = x[idx] - dragTarget.x;
-        const dy = x[idx + 1] - dragTarget.y;
-        e += w * (dx * dx + dy * dy);
-      }
-    }
-    return e;
+    if (!dragTarget || fixedPointIds.has(dragTarget.pointId)) return 0;
+    const idx = pIdx.get(dragTarget.pointId);
+    if (idx === undefined) return 0;
+    const w = dragTarget.strength ?? 0.1;
+    const dx = x[idx] - dragTarget.x;
+    const dy = x[idx + 1] - dragTarget.y;
+    return w * (dx * dx + dy * dy);
   };
-  const totalEnergy = (x: number[]): number => constraintOnlyEnergy(x) + dragOnlyEnergy(x);
-  const totalGrad = (x: number[]): number[] => {
-    const g = new Array(x.length).fill(0);
-    for (const fn of gFns) fn(x, g);
+  const totalEnergy = (x: number[]): number => CSCALE * rawConstraintEnergy(x) + dragOnlyEnergy(x);
+  const totalGradInto = (x: number[], out: number[]): void => {
+    for (let i = 0; i < out.length; i++) out[i] = 0;
+    for (const fn of gFns) fn(x, out);
+    if (CSCALE !== 1) {
+      for (let i = 0; i < out.length; i++) out[i] *= CSCALE;
+    }
     if (dragTarget && !fixedPointIds.has(dragTarget.pointId)) {
       const idx = pIdx.get(dragTarget.pointId);
       if (idx !== undefined) {
         const w = dragTarget.strength ?? 0.1;
-        g[idx] += 2 * w * (x[idx] - dragTarget.x);
-        g[idx + 1] += 2 * w * (x[idx + 1] - dragTarget.y);
+        out[idx] += 2 * w * (x[idx] - dragTarget.x);
+        out[idx + 1] += 2 * w * (x[idx + 1] - dragTarget.y);
       }
     }
-    return g;
   };
 
-  const result = lbfgsSolve(vars, totalEnergy, totalGrad);
+  const lbfgsIter = maxLBFGSIter ?? (dragTarget ? 120 : 200);
+  // Energy tolerance: we want rawConstraintEnergy < 1e-8, which in scaled space is CSCALE * 1e-8.
+  const energyTol = CSCALE * 1e-8;
+  const result = lbfgsSolve(vars, totalEnergy, totalGradInto, lbfgsIter, 1e-10, energyTol);
 
   const newPoints = points.map(p => {
     const idx = pIdx.get(p.id);
@@ -732,13 +900,13 @@ export function solveConstraints(
     return p;
   });
 
-  const cEnergy = constraintOnlyEnergy(result.x);
+  const cEnergy = rawConstraintEnergy(result.x);
   const dEnergy = dragOnlyEnergy(result.x);
   return {
-    success: result.success,
+    success: cEnergy < 1e-4,
     points: newPoints,
     iterations: result.iterations,
-    energy: result.energy,
+    energy: cEnergy + dEnergy,
     constraintEnergy: cEnergy,
     dragEnergy: dEnergy,
   };

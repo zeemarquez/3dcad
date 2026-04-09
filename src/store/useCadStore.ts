@@ -47,9 +47,16 @@ export interface GeometricInputOptions {
 
 export interface SketchData {
   points: { id: string; x: number; y: number }[];
-  lines: { id: string; p1Id: string; p2Id: string }[];
-  circles: { id: string; centerId: string; radius: number }[];
-  arcs: { id: string; centerId: string; startId: string; endId: string }[];
+  lines: { id: string; p1Id: string; p2Id: string; auxiliary?: boolean }[];
+  circles: { id: string; centerId: string; radius: number; auxiliary?: boolean }[];
+  arcs: {
+    id: string;
+    centerId: string;
+    startId: string;
+    endId: string;
+    complementaryArc?: boolean;
+    auxiliary?: boolean;
+  }[];
   constraints: { id: string; type: string; entityIds: string[]; params?: Record<string, number>; expression?: string }[];
 }
 

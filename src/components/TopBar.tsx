@@ -19,6 +19,7 @@ import {
   Equal,
   LogOut,
   Trash2,
+  CircleDashed,
   ArrowDownRight,
   CornerDownRight,
   Target,
@@ -40,6 +41,9 @@ import {
   CopyPlus,
   Boxes,
   FileArchive,
+  FlipHorizontal,
+  Undo2,
+  Redo2,
 } from 'lucide-react';
 
 const partIcons = {
@@ -190,8 +194,17 @@ const SketchTools = () => {
     clearPendingConstraintSelection,
     pendingConstraintType,
     deleteSelected,
+    toggleAuxiliarySelected,
     selection,
+    undoSketch,
+    redoSketch,
   } = useSketchStore();
+  const canUndoSketch = useSketchStore((s) => s.sketchUndoPast.length > 0);
+  const canRedoSketch = useSketchStore((s) => s.sketchUndoFuture.length > 0);
+
+  const hasCurveEntitySelected = selection.some(
+    (s) => s.type === 'line' || s.type === 'circle' || s.type === 'arc'
+  );
 
   const drawTools = [
     { id: 'line', label: 'Line', icon: Minus },
@@ -212,6 +225,7 @@ const SketchTools = () => {
     { id: 'tangent', label: 'Tangent', icon: ArrowDownRight },
     { id: 'concentric', label: 'Concent.', icon: Target },
     { id: 'midpoint', label: 'Midpoint', icon: Crosshair },
+    { id: 'symmetry', label: 'Symmetry', icon: FlipHorizontal },
   ];
 
   const dimensionTools: { id: ConstraintType; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
@@ -240,6 +254,23 @@ const SketchTools = () => {
   return (
     <div className="flex items-center gap-1 overflow-x-auto">
       <ToolBtn icon={LogOut} label="Close" variant="danger" onClick={exitSketchMode} title="Close Sketch" />
+
+      <Sep />
+
+      <ToolBtn
+        icon={Undo2}
+        label="Undo"
+        onClick={() => undoSketch()}
+        disabled={!canUndoSketch}
+        title="Undo (Ctrl+Z)"
+      />
+      <ToolBtn
+        icon={Redo2}
+        label="Redo"
+        onClick={() => redoSketch()}
+        disabled={!canRedoSketch}
+        title="Redo (Ctrl+Y)"
+      />
 
       <Sep />
 
@@ -286,6 +317,13 @@ const SketchTools = () => {
       {selection.length > 0 && (
         <>
           <Sep />
+          <ToolBtn
+            icon={CircleDashed}
+            label="Aux"
+            onClick={toggleAuxiliarySelected}
+            title="Toggle auxiliary (construction) geometry — dashed in sketch; ignored by extrude and regions"
+            disabled={!hasCurveEntitySelected}
+          />
           <ToolBtn icon={Trash2} label="Delete" variant="danger" onClick={deleteSelected} title="Delete selected" />
         </>
       )}

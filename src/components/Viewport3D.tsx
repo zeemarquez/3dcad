@@ -5,6 +5,7 @@ import {
   useCadStore,
   type GeometricSelectionRef,
   type SketchFeature,
+  type SketchData,
   type AxisFeature,
   type PlaneFeature,
   type PointFeature,
@@ -19,6 +20,8 @@ import {
 } from '../lib/cadEngine';
 import { featuresToCadFeatureInputs } from '../lib/cadFeatureInputs';
 import { getSketchPlaneBasis, sketch2DToWorld } from '../lib/sketchPlaneBasis';
+import { arcSignedSweep, sampleArcPoints } from '../lib/sketchArcPoints';
+import { mergeCoincidentSketchVertices, pickNextEdgeInFace, snapClosedPolyline } from '../lib/sketchLoopDetection';
 import {
   usePartViewportMode,
   type PartViewportGeometryKind,
@@ -125,27 +128,6 @@ function selectionHintObjectLabel(mode: PartViewportMode): string {
   if (a.has('face') && a.has('defaultPlane') && a.has('plane') && a.size === 3) return 'plane or face';
   if (a.has('face') && a.has('defaultPlane') && a.size === 2) return 'plane or face';
   return 'object';
-}
-
-function sampleArcPoints2D(
-  center: { x: number; y: number },
-  start: { x: number; y: number },
-  end: { x: number; y: number },
-  maxSegAngle = Math.PI / 24,
-): { x: number; y: number }[] {
-  const r = Math.hypot(start.x - center.x, start.y - center.y);
-  if (r < 1e-8) return [start, end];
-  const a0 = Math.atan2(start.y - center.y, start.x - center.x);
-  const a1 = Math.atan2(end.y - center.y, end.x - center.x);
-  let sweep = a1 - a0;
-  if (sweep < 0) sweep += Math.PI * 2; // sketch-store semantics are CCW start->end
-  const segs = Math.max(2, Math.ceil(sweep / maxSegAngle));
-  const pts: { x: number; y: number }[] = [];
-  for (let i = 0; i <= segs; i++) {
-    const a = a0 + (sweep * i) / segs;
-    pts.push({ x: center.x + r * Math.cos(a), y: center.y + r * Math.sin(a) });
-  }
-  return pts;
 }
 
 function signedArea2D(pts: { x: number; y: number }[]): number {
@@ -827,7 +809,7 @@ const SketchWireframes = () => {
           verts.push(x1, y1, z1, x2, y2, z2);
         }
       }
-      for (const arc of sd.arcs ?? []) {
+      for (const arc of (sd.arcs ?? []) as SketchData['arcs']) {
         const c = ptMap.get(arc.centerId);
         const s = ptMap.get(arc.startId);
         const e = ptMap.get(arc.endId);
@@ -836,10 +818,9 @@ const SketchWireframes = () => {
         if (r < 1e-8) continue;
         const a0 = Math.atan2(s.y - c.y, s.x - c.x);
         const a1 = Math.atan2(e.y - c.y, e.x - c.x);
-        // Arc semantics are CCW start -> end in sketch store.
-        let sweep = a1 - a0;
-        if (sweep < 0) sweep += Math.PI * 2;
-        const segs = Math.max(8, Math.ceil(sweep / (Math.PI / 24)));
+        const sweep = arcSignedSweep(a0, a1, !!arc.complementaryArc);
+        const sweepAbs = Math.abs(sweep);
+        const segs = Math.max(8, Math.ceil(sweepAbs / (Math.PI / 24)));
         for (let i = 0; i < segs; i++) {
           const t1 = i / segs, t2 = (i + 1) / segs;
           const aa = a0 + sweep * t1;
@@ -851,6 +832,11 @@ const SketchWireframes = () => {
       }
 
       // Filled regions in 3D (same concept as sketch mode): detect closed loops and holes.
+      // Merge coincident point ids + near-duplicate coordinates so the boundary graph closes.
+      const { canonical, mergedPtMap: loopPtMap } = mergeCoincidentSketchVertices(
+        sd.points ?? [],
+        sd.constraints ?? []
+      );
       // Build mixed loops from lines + arcs, plus full circles.
       type LoopEdge = { id: string; a: string; b: string; path: { x: number; y: number }[] };
       type LoopPoly = {
@@ -862,16 +848,34 @@ const SketchWireframes = () => {
       };
       const edges: LoopEdge[] = [];
       for (const l of sd.lines ?? []) {
-        const p1 = ptMap.get(l.p1Id), p2 = ptMap.get(l.p2Id);
+        if (l.auxiliary) continue;
+        const a = canonical(l.p1Id);
+        const b = canonical(l.p2Id);
+        if (a === b) continue;
+        const p1 = loopPtMap.get(a);
+        const p2 = loopPtMap.get(b);
         if (!p1 || !p2) continue;
-        edges.push({ id: `l_${l.id}`, a: l.p1Id, b: l.p2Id, path: [{ x: p1.x, y: p1.y }, { x: p2.x, y: p2.y }] });
+        edges.push({ id: `l_${l.id}`, a, b, path: [{ x: p1.x, y: p1.y }, { x: p2.x, y: p2.y }] });
       }
-      for (const a of sd.arcs ?? []) {
-        const c = ptMap.get(a.centerId), s = ptMap.get(a.startId), e = ptMap.get(a.endId);
+      for (const a of (sd.arcs ?? []) as SketchData['arcs']) {
+        if (a.auxiliary) continue;
+        const ca = canonical(a.centerId);
+        const sa = canonical(a.startId);
+        const ea = canonical(a.endId);
+        const c = loopPtMap.get(ca);
+        const s = loopPtMap.get(sa);
+        const e = loopPtMap.get(ea);
         if (!c || !s || !e) continue;
-        const path = sampleArcPoints2D({ x: c.x, y: c.y }, { x: s.x, y: s.y }, { x: e.x, y: e.y });
+        if (sa === ea) continue;
+        const path = sampleArcPoints(
+          { x: c.x, y: c.y },
+          { x: s.x, y: s.y },
+          { x: e.x, y: e.y },
+          Math.PI / 24,
+          { complementaryArc: !!a.complementaryArc }
+        );
         if (path.length < 2) continue;
-        edges.push({ id: `a_${a.id}`, a: a.startId, b: a.endId, path });
+        edges.push({ id: `a_${a.id}`, a: sa, b: ea, path });
       }
       const loops: LoopPoly[] = [];
       const adj = new Map<string, { edgeId: string; other: string }[]>();
@@ -891,22 +895,23 @@ const SketchWireframes = () => {
         let prevNode = seed.a;
         const thisUsed = new Set<string>([seed.id]);
         const pts = [...seed.path];
+        let incomingEdgeId = seed.id;
         while (curNode !== startNode) {
           const nbrs = (adj.get(curNode) ?? []).filter((n) => !thisUsed.has(n.edgeId));
           if (!nbrs.length) break;
-          const next = nbrs.find((n) => n.other !== prevNode) ?? nbrs[0];
+          const next = pickNextEdgeInFace(curNode, prevNode, incomingEdgeId, nbrs, ptMap, byId) ?? nbrs[0];
           const seg = byId.get(next.edgeId);
           if (!seg) break;
           thisUsed.add(seg.id);
           const forward = seg.a === curNode;
           pts.push(...(forward ? seg.path : [...seg.path].reverse()).slice(1));
+          incomingEdgeId = next.edgeId;
           prevNode = curNode;
           curNode = next.other;
         }
         if (curNode === startNode && pts.length >= 3) {
           for (const id of thisUsed) used.add(id);
-          const first = pts[0], last = pts[pts.length - 1];
-          const clean = Math.hypot(first.x - last.x, first.y - last.y) < 1e-8 ? pts.slice(0, -1) : pts;
+          const clean = snapClosedPolyline(pts);
           const areaAbs = Math.abs(signedArea2D(clean));
           if (areaAbs > 1e-8) {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -927,7 +932,8 @@ const SketchWireframes = () => {
         }
       }
       for (const c of sd.circles ?? []) {
-        const center = ptMap.get(c.centerId);
+        if (c.auxiliary) continue;
+        const center = loopPtMap.get(canonical(c.centerId));
         if (!center || c.radius <= 1e-8) continue;
         const segs = 72;
         const pts: { x: number; y: number }[] = [];

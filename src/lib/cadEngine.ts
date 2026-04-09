@@ -3,6 +3,8 @@ import opencascadeWasm from "replicad-opencascadejs/src/replicad_single.wasm?url
 import { setOC, draw, drawCircle, drawRectangle, drawProjection, Plane, revolution, type Shape3D } from "replicad";
 import type { GeometricSelectionRef, SketchFeature } from "../store/useCadStore";
 import { cross3, normalize3, getSketchPlaneBasis, worldToSketch2D } from "./sketchPlaneBasis";
+import { sampleArcPoints } from "./sketchArcPoints";
+import { mergeCoincidentSketchVertices, pickNextEdgeInFace } from "./sketchLoopDetection";
 import type { ShapeMesh } from "replicad";
 
 let _ready = false;
@@ -47,15 +49,23 @@ export interface SolidMeshData {
 // ---------- Sketch → replicad Drawing ----------
 
 interface SketchPoint { id: string; x: number; y: number }
-interface SketchLine  { id: string; p1Id: string; p2Id: string }
-interface SketchCircle { id: string; centerId: string; radius: number }
-interface SketchArc { id: string; centerId: string; startId: string; endId: string }
+interface SketchLine  { id: string; p1Id: string; p2Id: string; auxiliary?: boolean }
+interface SketchCircle { id: string; centerId: string; radius: number; auxiliary?: boolean }
+interface SketchArc {
+  id: string;
+  centerId: string;
+  startId: string;
+  endId: string;
+  complementaryArc?: boolean;
+  auxiliary?: boolean;
+}
 
 interface SketchData {
   points: SketchPoint[];
   lines: SketchLine[];
   circles?: SketchCircle[];
   arcs?: SketchArc[];
+  constraints?: { type: string; entityIds: string[] }[];
 }
 interface LoopEdge {
   id: string;
@@ -73,28 +83,6 @@ interface SketchRegionLoop {
   bbox: { minX: number; minY: number; maxX: number; maxY: number };
   polygon: { x: number; y: number }[];
   makeDrawing: () => any;
-}
-
-function sampleArcPoints(
-  center: { x: number; y: number },
-  start: { x: number; y: number },
-  end: { x: number; y: number },
-  maxSegAngle = Math.PI / 24,
-): { x: number; y: number }[] {
-  const r = Math.hypot(start.x - center.x, start.y - center.y);
-  if (r < 1e-8) return [start, end];
-  const a0 = Math.atan2(start.y - center.y, start.x - center.x);
-  const a1 = Math.atan2(end.y - center.y, end.x - center.x);
-  // Arc semantics in sketch store are CCW start -> end.
-  let sweep = a1 - a0;
-  if (sweep < 0) sweep += Math.PI * 2;
-  const segs = Math.max(2, Math.ceil(sweep / maxSegAngle));
-  const pts: { x: number; y: number }[] = [];
-  for (let i = 0; i <= segs; i++) {
-    const a = a0 + (sweep * i) / segs;
-    pts.push({ x: center.x + r * Math.cos(a), y: center.y + r * Math.sin(a) });
-  }
-  return pts;
 }
 
 function signedArea(pts: { x: number; y: number }[]): number {
@@ -119,35 +107,54 @@ function pointInPolygon(p: { x: number; y: number }, poly: { x: number; y: numbe
   return inside;
 }
 
-function findClosedMixedLoops(sd: SketchData): {
+function findClosedMixedLoops(
+  sd: SketchData,
+  merged: ReturnType<typeof mergeCoincidentSketchVertices>
+): {
   start: { x: number; y: number };
   segments: { kind: "line" | "arc"; end: { x: number; y: number }; via?: { x: number; y: number }; polyPath: { x: number; y: number }[] }[];
 }[] {
-  const ptMap = new Map<string, SketchPoint>((sd.points ?? []).map((p) => [p.id, p]));
+  const { canonical, mergedPtMap: ptMap } = merged;
   const edges: LoopEdge[] = [];
 
   for (const l of sd.lines ?? []) {
-    const p1 = ptMap.get(l.p1Id), p2 = ptMap.get(l.p2Id);
+    if (l.auxiliary) continue;
+    const a = canonical(l.p1Id);
+    const b = canonical(l.p2Id);
+    if (a === b) continue;
+    const p1 = ptMap.get(a);
+    const p2 = ptMap.get(b);
     if (!p1 || !p2) continue;
     edges.push({
       id: `line_${l.id}`,
-      a: l.p1Id,
-      b: l.p2Id,
+      a,
+      b,
       kind: "line",
       path: [{ x: p1.x, y: p1.y }, { x: p2.x, y: p2.y }],
     });
   }
 
   for (const a of sd.arcs ?? []) {
-    const c = ptMap.get(a.centerId);
-    const s = ptMap.get(a.startId);
-    const e = ptMap.get(a.endId);
+    if (a.auxiliary) continue;
+    const ca = canonical(a.centerId);
+    const sa = canonical(a.startId);
+    const ea = canonical(a.endId);
+    const c = ptMap.get(ca);
+    const s = ptMap.get(sa);
+    const e = ptMap.get(ea);
     if (!c || !s || !e) continue;
-    const path = sampleArcPoints({ x: c.x, y: c.y }, { x: s.x, y: s.y }, { x: e.x, y: e.y });
+    if (sa === ea) continue;
+    const path = sampleArcPoints(
+      { x: c.x, y: c.y },
+      { x: s.x, y: s.y },
+      { x: e.x, y: e.y },
+      Math.PI / 24,
+      { complementaryArc: !!a.complementaryArc }
+    );
     if (path.length < 2) continue;
     // Interior point that defines the exact circular arc branch in replicad.
     const via = path[Math.floor(path.length / 2)];
-    edges.push({ id: `arc_${a.id}`, a: a.startId, b: a.endId, kind: "arc", via, path });
+    edges.push({ id: `arc_${a.id}`, a: sa, b: ea, kind: "arc", via, path });
   }
 
   const adj = new Map<string, { edgeId: string; other: string }[]>();
@@ -169,16 +176,18 @@ function findClosedMixedLoops(sd: SketchData): {
     let prevNode = seed.a;
     const thisUsed = new Set<string>([seed.id]);
     const ordered: { seg: LoopEdge; forward: boolean }[] = [{ seg: seed, forward: true }];
+    let incomingEdgeId = seed.id;
 
     while (curNode !== startNode) {
       const nbrs = (adj.get(curNode) ?? []).filter((n) => !thisUsed.has(n.edgeId));
       if (!nbrs.length) break;
-      const next = nbrs.find((n) => n.other !== prevNode) ?? nbrs[0];
+      const next = pickNextEdgeInFace(curNode, prevNode, incomingEdgeId, nbrs, ptMap, byId) ?? nbrs[0];
       const seg = byId.get(next.edgeId);
       if (!seg) break;
       thisUsed.add(seg.id);
       const forward = seg.a === curNode;
       ordered.push({ seg, forward });
+      incomingEdgeId = next.edgeId;
       prevNode = curNode;
       curNode = next.other;
     }
@@ -201,8 +210,9 @@ function findClosedMixedLoops(sd: SketchData): {
 }
 
 function buildSketchRegionLoops(sd: SketchData): SketchRegionLoop[] {
+  const merged = mergeCoincidentSketchVertices(sd.points ?? [], sd.constraints ?? []);
   const loops: SketchRegionLoop[] = [];
-  const mixed = findClosedMixedLoops(sd);
+  const mixed = findClosedMixedLoops(sd, merged);
 
   for (let i = 0; i < mixed.length; i++) {
     const loop = mixed[i];
@@ -240,9 +250,10 @@ function buildSketchRegionLoops(sd: SketchData): SketchRegionLoop[] {
     });
   }
 
-  const ptMap = new Map<string, SketchPoint>((sd.points ?? []).map((p) => [p.id, p]));
+  const { canonical, mergedPtMap: ptMap } = merged;
   for (const c of sd.circles ?? []) {
-    const center = ptMap.get(c.centerId);
+    if (c.auxiliary) continue;
+    const center = ptMap.get(canonical(c.centerId));
     if (!center || c.radius <= 1e-8) continue;
     const segs = 72;
     const poly: { x: number; y: number }[] = [];

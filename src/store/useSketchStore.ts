@@ -7,6 +7,7 @@ import {
   type SolverArc,
   type SolverConstraint,
 } from '../lib/constraintSolver';
+import { sampleArcPoints } from '../lib/sketchArcPoints';
 
 export const SKETCH_REF_ORIGIN_ID = '__ref_origin__';
 export const SKETCH_REF_X_AXIS_ID = '__ref_x_axis__';
@@ -22,12 +23,15 @@ export interface SketchLine {
   id: string;
   p1Id: string;
   p2Id: string;
+  /** Construction geometry: dashed in sketch, ignored for extrude/regions. */
+  auxiliary?: boolean;
 }
 
 export interface SketchCircle {
   id: string;
   centerId: string;
   radius: number;
+  auxiliary?: boolean;
 }
 
 export interface SketchArc {
@@ -35,6 +39,9 @@ export interface SketchArc {
   centerId: string;
   startId: string;
   endId: string;
+  /** True: longer arc between start and end; omit/false: shorter (minor) arc. */
+  complementaryArc?: boolean;
+  auxiliary?: boolean;
 }
 
 export type ConstraintType =
@@ -55,7 +62,8 @@ export type ConstraintType =
   | 'horizontalDistance'
   | 'verticalDistance'
   | 'radius'
-  | 'angle';
+  | 'angle'
+  | 'symmetry';
 
 export interface SketchConstraint {
   id: string;
@@ -76,6 +84,37 @@ export interface SketchDataSnapshot {
   circles: SketchCircle[];
   arcs: SketchArc[];
   constraints: SketchConstraint[];
+}
+
+/** Full sketch UI + geometry snapshot for undo/redo (excludes history stacks). */
+export interface SketchHistorySnapshot {
+  points: SketchPoint[];
+  lines: SketchLine[];
+  circles: SketchCircle[];
+  arcs: SketchArc[];
+  constraints: SketchConstraint[];
+  selection: SelectionItem[];
+  statusMessage: string;
+  pendingDimensionInput: DimensionInputRequest | null;
+  pendingConstraintType: ConstraintType | null;
+}
+
+const SKETCH_HISTORY_MAX = 100;
+
+let applyingSketchHistory = false;
+
+function cloneSketchHistorySnapshot(s: SketchState): SketchHistorySnapshot {
+  return {
+    points: structuredClone(s.points),
+    lines: structuredClone(s.lines),
+    circles: structuredClone(s.circles),
+    arcs: structuredClone(s.arcs),
+    constraints: structuredClone(s.constraints),
+    selection: structuredClone(s.selection),
+    statusMessage: s.statusMessage,
+    pendingDimensionInput: s.pendingDimensionInput ? structuredClone(s.pendingDimensionInput) : null,
+    pendingConstraintType: s.pendingConstraintType,
+  };
 }
 
 export interface DimensionInputRequest {
@@ -104,9 +143,13 @@ interface SketchState {
   addPoint: (x: number, y: number) => string;
   addLine: (p1Id: string, p2Id: string) => string;
   addCircle: (centerId: string, radius: number) => string;
-  addArc: (centerId: string, startId: string, endId: string) => string;
+  setCircleRadius: (circleId: string, radius: number) => void;
+  addArc: (centerId: string, startId: string, endId: string, complementaryArc?: boolean) => string;
 
-  applyConstraint: (type: ConstraintType) => { success: boolean; message: string };
+  applyConstraint: (
+    type: ConstraintType,
+    options?: { skipHistory?: boolean }
+  ) => { success: boolean; message: string };
   beginConstraintSelection: (type: ConstraintType) => void;
   clearPendingConstraintSelection: () => void;
   submitDimensionInput: (rawValue: string, sourceExpression?: string) => { success: boolean; message: string };
@@ -116,16 +159,28 @@ interface SketchState {
   removeConstraint: (id: string) => void;
   solveConstraints: () => void;
   dragPoint: (pointId: string, x: number, y: number) => void;
+  /** Project points onto the constraint manifold after a drag session ends. */
+  finalizeDrag: () => void;
+  /** Rigid translation of sketch points by (dx, dy), respecting fix constraints and re-solving. */
+  translateSketchPoints: (pointIds: string[], dx: number, dy: number) => void;
 
   toggleSelect: (item: SelectionItem, multi: boolean) => void;
   clearSelection: () => void;
 
   deleteSelected: () => void;
+  /** Flip auxiliary flag on selected lines, circles, and arcs (points/constraints ignored). */
+  toggleAuxiliarySelected: () => void;
   clearSketch: () => void;
   setStatusMessage: (msg: string) => void;
 
   loadSketchData: (data: SketchDataSnapshot) => void;
   getSketchData: () => SketchDataSnapshot;
+
+  sketchUndoPast: SketchHistorySnapshot[];
+  sketchUndoFuture: SketchHistorySnapshot[];
+  pushSketchHistory: () => void;
+  undoSketch: () => void;
+  redoSketch: () => void;
 
   findNearestPoint: (x: number, y: number, threshold: number) => string | null;
   findNearestEntity: (
@@ -213,16 +268,23 @@ function distToCircle(
   return Math.abs(d - r);
 }
 
-function normalizeAngle(a: number): number {
-  while (a < 0) a += 2 * Math.PI;
-  while (a >= 2 * Math.PI) a -= 2 * Math.PI;
-  return a;
-}
-
-function isAngleBetween(angle: number, start: number, end: number): boolean {
-  const a = normalizeAngle(angle - start);
-  const e = normalizeAngle(end - start);
-  return a <= e + 1e-6;
+/** Symmetry lists circle A then B; centers are solved as points — radii must stay matched (B ← A). */
+function equalizeSymmetryCircleRadii(
+  circles: SketchCircle[],
+  constraints: SketchConstraint[]
+): SketchCircle[] {
+  let out = circles;
+  for (const cn of constraints) {
+    if (cn.type !== 'symmetry' || cn.entityIds.length !== 3) continue;
+    const idA = cn.entityIds[1];
+    const idB = cn.entityIds[2];
+    const ca = out.find((c) => c.id === idA);
+    const cb = out.find((c) => c.id === idB);
+    if (!ca || !cb) continue;
+    if (Math.abs(cb.radius - ca.radius) < 1e-12) continue;
+    out = out.map((c) => (c.id === idB ? { ...c, radius: ca.radius } : c));
+  }
+  return out;
 }
 
 export const useSketchStore = create<SketchState>((set, get) => ({
@@ -235,6 +297,56 @@ export const useSketchStore = create<SketchState>((set, get) => ({
   statusMessage: '',
   pendingDimensionInput: null,
   pendingConstraintType: null,
+  sketchUndoPast: [],
+  sketchUndoFuture: [],
+
+  pushSketchHistory: () => {
+    if (applyingSketchHistory) return;
+    const s = get();
+    const snap = cloneSketchHistorySnapshot(s);
+    set((state) => ({
+      sketchUndoPast: [...state.sketchUndoPast, snap].slice(-SKETCH_HISTORY_MAX),
+      sketchUndoFuture: [],
+    }));
+  },
+
+  undoSketch: () => {
+    const s = get();
+    if (s.sketchUndoPast.length === 0) return;
+    applyingSketchHistory = true;
+    try {
+      const prev = s.sketchUndoPast[s.sketchUndoPast.length - 1];
+      const current = cloneSketchHistorySnapshot(s);
+      const newPast = s.sketchUndoPast.slice(0, -1);
+      set({
+        ...prev,
+        sketchUndoPast: newPast,
+        sketchUndoFuture: [...s.sketchUndoFuture, current],
+      });
+      get().solveConstraints();
+    } finally {
+      applyingSketchHistory = false;
+    }
+  },
+
+  redoSketch: () => {
+    const s = get();
+    if (s.sketchUndoFuture.length === 0) return;
+    applyingSketchHistory = true;
+    try {
+      const next = s.sketchUndoFuture[s.sketchUndoFuture.length - 1];
+      const current = cloneSketchHistorySnapshot(s);
+      const newFuture = s.sketchUndoFuture.slice(0, -1);
+      set({
+        ...next,
+        sketchUndoPast: [...s.sketchUndoPast, current].slice(-SKETCH_HISTORY_MAX),
+        sketchUndoFuture: newFuture,
+      });
+      get().solveConstraints();
+    } finally {
+      applyingSketchHistory = false;
+    }
+  },
 
   addPoint: (x: number, y: number) => {
     const id = uid();
@@ -254,7 +366,25 @@ export const useSketchStore = create<SketchState>((set, get) => ({
     return id;
   },
 
-  addArc: (centerId: string, startId: string, endId: string) => {
+  setCircleRadius: (circleId: string, radius: number) => {
+    const r = Math.max(1e-4, radius);
+    set((s) => {
+      let circles = s.circles.map((c) => (c.id === circleId ? { ...c, radius: r } : c));
+      for (const cn of s.constraints) {
+        if (cn.type !== 'symmetry' || cn.entityIds.length !== 3) continue;
+        const idA = cn.entityIds[1];
+        const idB = cn.entityIds[2];
+        if (idA !== circleId && idB !== circleId) continue;
+        const partnerId = circleId === idA ? idB : idA;
+        if (!circles.some((c) => c.id === partnerId)) continue;
+        circles = circles.map((c) => (c.id === partnerId ? { ...c, radius: r } : c));
+      }
+      return { circles };
+    });
+    get().solveConstraints();
+  },
+
+  addArc: (centerId: string, startId: string, endId: string, complementaryArc?: boolean) => {
     const id = uid();
     const state = get();
     const center = state.points.find((p) => p.id === centerId);
@@ -263,7 +393,16 @@ export const useSketchStore = create<SketchState>((set, get) => ({
 
     const arcConstraintId = uid();
     set((s) => ({
-      arcs: [...s.arcs, { id, centerId, startId, endId }],
+      arcs: [
+        ...s.arcs,
+        {
+          id,
+          centerId,
+          startId,
+          endId,
+          ...(complementaryArc ? { complementaryArc: true } : {}),
+        },
+      ],
       constraints: [
         ...s.constraints,
         { id: arcConstraintId, type: 'arcRadius' as ConstraintType, entityIds: [id] },
@@ -272,7 +411,7 @@ export const useSketchStore = create<SketchState>((set, get) => ({
     return id;
   },
 
-  applyConstraint: (type: ConstraintType) => {
+  applyConstraint: (type: ConstraintType, options?: { skipHistory?: boolean }) => {
     const state = get();
     const sel = state.selection;
 
@@ -286,6 +425,8 @@ export const useSketchStore = create<SketchState>((set, get) => ({
     let params: Record<string, number> | undefined;
     let valid = false;
     let pendingInput: DimensionInputRequest | null = null;
+    /** When the chosen tool maps to another constraint kind (e.g. Coincident + line/point → pointOnLine). */
+    let resolvedType: ConstraintType = type;
 
     switch (type) {
       case 'fix':
@@ -304,6 +445,10 @@ export const useSketchStore = create<SketchState>((set, get) => ({
         if (selPoints.length === 2) {
           entityIds = [selPoints[0].id, selPoints[1].id];
           valid = true;
+        } else if (selLines.length === 1 && selPoints.length === 1) {
+          entityIds = [selLines[0].id, selPoints[0].id];
+          valid = true;
+          resolvedType = 'pointOnLine';
         }
         break;
 
@@ -503,6 +648,42 @@ export const useSketchStore = create<SketchState>((set, get) => ({
         }
         break;
 
+      case 'symmetry': {
+        if (sel.length !== 3) break;
+        if (sel[0].type !== 'line') break;
+        if (sel[1].type !== sel[2].type) break;
+        if (sel[1].id === sel[2].id) break;
+        entityIds = [sel[0].id, sel[1].id, sel[2].id];
+        // Line–line: pair endpoints so each A endpoint matches the nearer B endpoint (true
+        // corner partners). Opposite p1/p2 winding on one edge otherwise pairs diagonals and
+        // drives width → 0. Do not use the axis line from state — ref x/y axes are not in
+        // state.lines, so axis-based residual pairing was skipped and swap never applied.
+        if (sel[1].type === 'line' && sel[2].type === 'line') {
+          const lineA = state.lines.find((l) => l.id === sel[1].id);
+          const lineB = state.lines.find((l) => l.id === sel[2].id);
+          if (lineA && lineB) {
+            const pt = (id: string) => state.points.find((p) => p.id === id);
+            const a1 = pt(lineA.p1Id),
+              a2 = pt(lineA.p2Id);
+            const b1 = pt(lineB.p1Id),
+              b2 = pt(lineB.p2Id);
+            if (a1 && a2 && b1 && b2) {
+              const dx1 = a1.x - b1.x,
+                dy1 = a1.y - b1.y;
+              const dx2 = a1.x - b2.x,
+                dy2 = a1.y - b2.y;
+              const d1 = dx1 * dx1 + dy1 * dy1;
+              const d2 = dx2 * dx2 + dy2 * dy2;
+              if (d2 < d1 - 1e-12) {
+                params = { swapLineBEndpoints: 1 };
+              }
+            }
+          }
+        }
+        valid = true;
+        break;
+      }
+
       case 'angle':
         if (selLines.length === 2) {
           const l1 = state.lines.find((l) => l.id === selLines[0].id);
@@ -544,7 +725,7 @@ export const useSketchStore = create<SketchState>((set, get) => ({
     if (!valid) {
       const messages: Record<string, string> = {
         fix: 'Select 1 point',
-        coincident: 'Select 2 points',
+        coincident: 'Select 2 points, or 1 line and 1 point',
         horizontal: 'Select 1 line',
         vertical: 'Select 1 line',
         equal: 'Select 2 lines',
@@ -560,32 +741,42 @@ export const useSketchStore = create<SketchState>((set, get) => ({
         verticalDistance: 'Select 2 points',
         radius: 'Select 1 circle or 1 arc',
         angle: 'Select 2 lines',
+        symmetry: 'Select axis line, then entity A, then entity B (order matters)',
       };
       const msg = messages[type] || 'Invalid selection';
       set({ statusMessage: msg });
       return { success: false, message: msg };
     }
 
+    if (!options?.skipHistory) {
+      get().pushSketchHistory();
+    }
+
     const constraintId = uid();
     const newConstraint: SketchConstraint = {
       id: constraintId,
-      type,
+      type: resolvedType,
       entityIds,
       ...(params && { params }),
     };
 
-    set((s) => ({ constraints: [...s.constraints, newConstraint] }));
+    set((s) => {
+      const nextConstraints = [...s.constraints, newConstraint];
+      const circles = equalizeSymmetryCircleRadii(s.circles, nextConstraints);
+      return { constraints: nextConstraints, circles };
+    });
 
     get().solveConstraints();
 
-    set({ statusMessage: `${type} constraint applied` });
-    return { success: true, message: `${type} constraint applied` };
+    const appliedLabel = type === 'coincident' ? 'Coincident' : resolvedType;
+    set({ statusMessage: `${appliedLabel} constraint applied` });
+    return { success: true, message: `${appliedLabel} constraint applied` };
   },
 
   beginConstraintSelection: (type: ConstraintType) => {
     const hints: Record<string, string> = {
       fix: 'Select 1 point',
-      coincident: 'Select 2 points',
+      coincident: 'Select 2 points, or 1 line and 1 point',
       horizontal: 'Select 1 line',
       vertical: 'Select 1 line',
       equal: 'Select 2 lines',
@@ -601,6 +792,7 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       verticalDistance: 'Select 2 points',
       radius: 'Select 1 circle or 1 arc',
       angle: 'Select 2 lines',
+      symmetry: '1) Symmetry axis (line)  2) Entity A  3) Entity B',
     };
     set({
       pendingConstraintType: type,
@@ -620,6 +812,8 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       set({ statusMessage: msg });
       return { success: false, message: msg };
     }
+
+    get().pushSketchHistory();
 
     const params: Record<string, number> = { [req.paramKey]: parsed };
     set((s) => {
@@ -713,6 +907,7 @@ export const useSketchStore = create<SketchState>((set, get) => ({
   },
 
   removeConstraint: (id: string) => {
+    get().pushSketchHistory();
     set((s) => ({ constraints: s.constraints.filter((c) => c.id !== id) }));
   },
 
@@ -729,7 +924,8 @@ export const useSketchStore = create<SketchState>((set, get) => ({
     );
 
     if (result.points.length > 0) {
-      set({ points: result.points });
+      const circles = equalizeSymmetryCircleRadii(state.circles, state.constraints);
+      set({ points: result.points, circles });
     }
   },
 
@@ -738,7 +934,6 @@ export const useSketchStore = create<SketchState>((set, get) => ({
     const point = state.points.find((p) => p.id === pointId);
     if (!point) return;
 
-    // If there are no constraints, drag directly.
     if (state.constraints.length === 0) {
       set({
         points: state.points.map((p) => (p.id === pointId ? { ...p, x, y } : p)),
@@ -746,49 +941,73 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       return;
     }
 
-    // Continuation-based drag:
-    // solve several small constrained steps toward the cursor each frame.
-    // This is much more stable for 1-DoF manifolds than one large solve.
-    let working = state.points as SolverPoint[];
-    let improved = false;
-    let bestEnergy = Number.POSITIVE_INFINITY;
-    const maxSubStep = 0.2;
-    const maxIters = 12;
+    if (state.constraints.some((c) => c.type === 'fix' && c.entityIds[0] === pointId)) return;
 
-    for (let i = 0; i < maxIters; i++) {
-      const wp = working.find((p) => p.id === pointId);
-      if (!wp) break;
-      const dx = x - wp.x;
-      const dy = y - wp.y;
-      const dist = Math.hypot(dx, dy);
-      if (dist < 1e-4) break;
+    // Single solver call per frame. DRAG_CONSTRAINT_SCALE (1e4) inside
+    // solveConstraints keeps constraints tight, so sub-stepping is unnecessary.
+    // Projection is deferred to finalizeDrag (called on pointer-up).
+    const result = solveConstraints(
+      state.points as SolverPoint[],
+      state.lines as SolverLine[],
+      state.circles as SolverCircle[],
+      state.arcs as SolverArc[],
+      state.constraints as SolverConstraint[],
+      { pointId, x, y, strength: 10 },
+      50
+    );
 
-      const step = dist > maxSubStep ? maxSubStep / dist : 1;
-      const tx = wp.x + dx * step;
-      const ty = wp.y + dy * step;
+    if (result.points.length > 0 && result.constraintEnergy < 1e-2) {
+      set({ points: result.points as SketchPoint[] });
+    }
+  },
 
-      const result = solveConstraints(
-        working,
-        state.lines as SolverLine[],
-        state.circles as SolverCircle[],
-        state.arcs as SolverArc[],
-        state.constraints as SolverConstraint[],
-        { pointId, x: tx, y: ty, strength: 0.35 }
-      );
-      if (result.points.length === 0) break;
+  finalizeDrag: () => {
+    const state = get();
+    if (state.constraints.length === 0) return;
+    const result = solveConstraints(
+      state.points as SolverPoint[],
+      state.lines as SolverLine[],
+      state.circles as SolverCircle[],
+      state.arcs as SolverArc[],
+      state.constraints as SolverConstraint[],
+      undefined,
+      100
+    );
+    if (result.constraintEnergy < 1e-6) {
+      set({ points: result.points as SketchPoint[] });
+    }
+  },
 
-      // Keep the best low-energy branch and continue from it.
-      if (result.constraintEnergy <= 2e-4 || result.constraintEnergy <= bestEnergy + 1e-6) {
-        working = result.points as SolverPoint[];
-        bestEnergy = Math.min(bestEnergy, result.constraintEnergy);
-        improved = true;
-      } else {
-        break;
+  translateSketchPoints: (pointIds: string[], dx: number, dy: number) => {
+    if (dx === 0 && dy === 0) return;
+    const state = get();
+    const fixedIds = new Set<string>();
+    for (const c of state.constraints) {
+      if (c.type === 'fix' && c.entityIds.length === 1) {
+        fixedIds.add(c.entityIds[0]);
       }
     }
+    const ids = [...new Set(pointIds)].filter((id) => !fixedIds.has(id));
+    if (ids.length === 0) return;
 
-    if (improved && bestEnergy <= 5e-4) {
-      set({ points: working as any });
+    const nextPoints = state.points.map((p) =>
+      ids.includes(p.id) ? { ...p, x: p.x + dx, y: p.y + dy } : p
+    );
+
+    if (state.constraints.length === 0) {
+      set({ points: nextPoints });
+      return;
+    }
+
+    const result = solveConstraints(
+      nextPoints as SolverPoint[],
+      state.lines as SolverLine[],
+      state.circles as SolverCircle[],
+      state.arcs as SolverArc[],
+      state.constraints as SolverConstraint[]
+    );
+    if (result.points.length > 0) {
+      set({ points: result.points as SketchPoint[] });
     }
   },
 
@@ -811,6 +1030,8 @@ export const useSketchStore = create<SketchState>((set, get) => ({
 
   deleteSelected: () => {
     const state = get();
+    if (state.selection.length === 0) return;
+    get().pushSketchHistory();
     const protectedOriginPointId = getProtectedOriginPointId(state);
     const protectedOriginFixConstraintId = getProtectedOriginFixConstraintId(state);
     const selectedPointIds = new Set(
@@ -908,6 +1129,35 @@ export const useSketchStore = create<SketchState>((set, get) => ({
     });
   },
 
+  toggleAuxiliarySelected: () => {
+    const pre = get();
+    const sel0 = pre.selection;
+    const hasCurve =
+      sel0.some((x) => x.type === 'line') ||
+      sel0.some((x) => x.type === 'circle') ||
+      sel0.some((x) => x.type === 'arc');
+    if (!hasCurve) return;
+    get().pushSketchHistory();
+    set((s) => {
+      const sel = s.selection;
+      const lineIds = new Set(sel.filter((x) => x.type === 'line').map((x) => x.id));
+      const circleIds = new Set(sel.filter((x) => x.type === 'circle').map((x) => x.id));
+      const arcIds = new Set(sel.filter((x) => x.type === 'arc').map((x) => x.id));
+      if (lineIds.size === 0 && circleIds.size === 0 && arcIds.size === 0) return s;
+      return {
+        lines: s.lines.map((l) =>
+          lineIds.has(l.id) ? { ...l, auxiliary: !l.auxiliary } : l
+        ),
+        circles: s.circles.map((c) =>
+          circleIds.has(c.id) ? { ...c, auxiliary: !c.auxiliary } : c
+        ),
+        arcs: s.arcs.map((a) =>
+          arcIds.has(a.id) ? { ...a, auxiliary: !a.auxiliary } : a
+        ),
+      };
+    });
+  },
+
   clearSketch: () =>
     set(() => {
       const seeded = ensureFixedOriginSeed([], []);
@@ -921,6 +1171,8 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       statusMessage: '',
       pendingDimensionInput: null,
       pendingConstraintType: null,
+      sketchUndoPast: [],
+      sketchUndoFuture: [],
       };
     }),
 
@@ -941,6 +1193,8 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       statusMessage: '',
       pendingDimensionInput: null,
       pendingConstraintType: null,
+      sketchUndoPast: [],
+      sketchUndoFuture: [],
     });
   },
 
@@ -958,10 +1212,10 @@ export const useSketchStore = create<SketchState>((set, get) => ({
   findNearestPoint: (x: number, y: number, threshold: number) => {
     const state = get();
     let bestId: string | null = null;
-    let bestDist = threshold;
+    let bestDist = Infinity;
     for (const p of state.points) {
       const d = Math.sqrt((p.x - x) ** 2 + (p.y - y) ** 2);
-      if (d < bestDist) {
+      if (d <= threshold && d < bestDist) {
         bestDist = d;
         bestId = p.id;
       }
@@ -1008,16 +1262,28 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       const start = state.points.find((p) => p.id === a.startId);
       const end = state.points.find((p) => p.id === a.endId);
       if (!center || !start || !end) continue;
-      const radius = Math.sqrt((start.x - center.x) ** 2 + (start.y - center.y) ** 2);
-      const dc = distToCircle(x, y, center.x, center.y, radius);
-      if (dc < bestDist) {
-        const angle = Math.atan2(y - center.y, x - center.x);
-        const startAngle = Math.atan2(start.y - center.y, start.x - center.x);
-        const endAngle = Math.atan2(end.y - center.y, end.x - center.x);
-        if (isAngleBetween(angle, startAngle, endAngle)) {
-          bestDist = dc;
-          best = { type: 'arc', id: a.id };
-        }
+      const samples = sampleArcPoints(
+        { x: center.x, y: center.y },
+        { x: start.x, y: start.y },
+        { x: end.x, y: end.y },
+        Math.PI / 20,
+        { complementaryArc: !!a.complementaryArc }
+      );
+      let dArc = Infinity;
+      for (let i = 0; i < samples.length - 1; i++) {
+        const ds = distToSegment(
+          x,
+          y,
+          samples[i].x,
+          samples[i].y,
+          samples[i + 1].x,
+          samples[i + 1].y
+        );
+        if (ds < dArc) dArc = ds;
+      }
+      if (dArc < bestDist) {
+        bestDist = dArc;
+        best = { type: 'arc', id: a.id };
       }
     }
 
