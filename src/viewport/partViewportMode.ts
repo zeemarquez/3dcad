@@ -3,7 +3,7 @@ import { useCadStore } from '../store/useCadStore';
 import type { Feature } from '../store/useCadStore';
 
 /** Geometry kinds that can be filtered in part viewport selection mode */
-export type PartViewportGeometryKind = 'sketch' | 'face' | 'edge' | 'point' | 'defaultPlane';
+export type PartViewportGeometryKind = 'sketch' | 'face' | 'edge' | 'point' | 'defaultPlane' | 'plane';
 
 export type PartViewportMode =
   | { type: 'normal' }
@@ -40,7 +40,7 @@ const POINT_ONLY_INPUT_FIELDS = new Set([
 export function allowedGeometryKindsFromField(field: string): PartViewportGeometryKind[] {
   if (field.endsWith('Edges')) return ['edge'];
   if (field.startsWith('sketch_')) return ['sketch'];
-  if (PLANE_FACE_INPUT_FIELDS.has(field)) return ['face', 'defaultPlane'];
+  if (PLANE_FACE_INPUT_FIELDS.has(field)) return ['face', 'defaultPlane', 'plane'];
   if (POINT_ONLY_INPUT_FIELDS.has(field)) return ['point'];
   return ['sketch', 'face', 'edge', 'point', 'defaultPlane'];
 }
@@ -56,11 +56,11 @@ export function isFeatureEditPreviewActive(params: {
   const selectedFeature = selectedIndex >= 0 ? features[selectedIndex] : null;
   const editableSolidFeature =
     !!selectedFeature &&
-    ['extrude', 'cut', 'revolve', 'fillet', 'chamfer'].includes(selectedFeature.type);
+    ['extrude', 'cut', 'revolve', 'revolveCut', 'fillet', 'chamfer'].includes(selectedFeature.type);
   const canPreviewCreate =
     !selectedFeature &&
     !!activeCommand &&
-    ['extrude', 'cut', 'revolve', 'fillet', 'chamfer'].includes(activeCommand) &&
+    ['extrude', 'cut', 'revolve', 'revolveCut', 'fillet', 'chamfer'].includes(activeCommand) &&
     !!transientPreviewFeature;
   return (!!editableSolidFeature && !!selectedFeature) || (!!canPreviewCreate && !!transientPreviewFeature);
 }
@@ -95,11 +95,11 @@ export function computePartViewportMode(params: {
   const selectedFeature = selectedIndex >= 0 ? params.features[selectedIndex] : null;
   const editingSolid =
     !!selectedFeature &&
-    ['extrude', 'cut', 'revolve', 'fillet', 'chamfer'].includes(selectedFeature.type);
+    ['extrude', 'cut', 'revolve', 'revolveCut', 'fillet', 'chamfer'].includes(selectedFeature.type);
   const creatingNew =
     !selectedFeature &&
     !!params.activeCommand &&
-    ['extrude', 'cut', 'revolve', 'fillet', 'chamfer'].includes(params.activeCommand) &&
+    ['extrude', 'cut', 'revolve', 'revolveCut', 'fillet', 'chamfer'].includes(params.activeCommand) &&
     !!params.transientPreviewFeature;
   return {
     type: 'featureEdit',

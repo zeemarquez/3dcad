@@ -47,6 +47,7 @@ const partIcons = {
   extrude: new URL('../assets/toolbar-icons/part/extrude.png', import.meta.url).href,
   cut: new URL('../assets/toolbar-icons/part/cut.png', import.meta.url).href,
   revolve: new URL('../assets/toolbar-icons/part/revolve.png', import.meta.url).href,
+  revolveCut: new URL('../assets/toolbar-icons/part/revolve-cut.png', import.meta.url).href,
   fillet: new URL('../assets/toolbar-icons/part/fillet.png', import.meta.url).href,
   chamfer: new URL('../assets/toolbar-icons/part/chamfer.png', import.meta.url).href,
   plane: new URL('../assets/toolbar-icons/part/plane.png', import.meta.url).href,
@@ -132,6 +133,7 @@ const PartTools = () => {
         { id: 'extrude', label: 'Extrude', icon: Box, iconSrc: partIcons.extrude },
         { id: 'cut', label: 'Cut', icon: Scissors, iconSrc: partIcons.cut },
         { id: 'revolve', label: 'Revolve', icon: RotateCw, iconSrc: partIcons.revolve },
+        { id: 'revolveCut', label: 'Revolve cut', icon: Scissors, iconSrc: partIcons.revolveCut },
         { id: 'fillet', label: 'Fillet', icon: Circle, iconSrc: partIcons.fillet },
         { id: 'chamfer', label: 'Chamfer', icon: CornerDownRight, iconSrc: partIcons.chamfer },
       ].map((t) => (

@@ -1,6 +1,6 @@
 import opencascade from "replicad-opencascadejs/src/replicad_single.js";
 import opencascadeWasm from "replicad-opencascadejs/src/replicad_single.wasm?url";
-import { setOC, draw, drawCircle, drawRectangle, drawProjection, Plane, type Shape3D } from "replicad";
+import { setOC, draw, drawCircle, drawRectangle, drawProjection, Plane, revolution, type Shape3D } from "replicad";
 import type { GeometricSelectionRef, SketchFeature } from "../store/useCadStore";
 import { cross3, normalize3, getSketchPlaneBasis, worldToSketch2D } from "./sketchPlaneBasis";
 import type { ShapeMesh } from "replicad";
@@ -311,7 +311,7 @@ function kernelPlaneOffset(plane: string, offset: number): number {
 function getReplicadSketchPlaneForExtrude(op: {
   plane: string;
   planeOffset: number;
-  planeRef?: Extract<GeometricSelectionRef, { type: "defaultPlane" | "face" }> | null;
+  planeRef?: Extract<GeometricSelectionRef, { type: "defaultPlane" | "face" | "plane" }> | null;
   height: number;
   reverse: boolean;
   symmetric: boolean;
@@ -321,6 +321,28 @@ function getReplicadSketchPlaneForExtrude(op: {
   const po = Number(op.planeOffset) || 0;
   const startOffset = Number(op.startOffset) || 0;
   const ref = op.planeRef;
+
+  if (ref?.type === "plane") {
+    const pl = op.plane === "xz" || op.plane === "yz" ? op.plane : "xy";
+    const sk: SketchFeature = {
+      id: "__sketchPlaneRef__",
+      name: "__sketchPlaneRef__",
+      type: "sketch",
+      parameters: { plane: pl, planeOffset: po, planeRef: ref },
+    };
+    const basis = getSketchPlaneBasis(sk);
+    const n = basis.n;
+    const u = basis.u;
+    let shift = startOffset;
+    if (op.symmetric) shift -= effectiveHeight / 2;
+    else if (op.reverse) shift -= effectiveHeight;
+    const origin: [number, number, number] = [
+      basis.origin[0] + n[0] * shift,
+      basis.origin[1] + n[1] * shift,
+      basis.origin[2] + n[2] * shift,
+    ];
+    return new Plane(origin, u, n);
+  }
 
   if (ref?.type === "face" && ref.normal) {
     const [nx, ny, nz] = ref.normal;
@@ -355,6 +377,70 @@ function getReplicadSketchPlaneForExtrude(op: {
   return new Plane([0, 0, eff], [1, 0, 0], [0, 0, 1]);
 }
 
+/** Sketch plane placement for revolve (no extrusion-height shift — matches sketch location). */
+function getReplicadSketchPlaneForRevolve(op: {
+  plane: string;
+  planeOffset: number;
+  planeRef?: Extract<GeometricSelectionRef, { type: "defaultPlane" | "face" | "plane" }> | null;
+  startOffset: number;
+}): Plane {
+  const po = Number(op.planeOffset) || 0;
+  const startOffset = Number(op.startOffset) || 0;
+  const ref = op.planeRef;
+
+  if (ref?.type === "plane") {
+    const pl = op.plane === "xz" || op.plane === "yz" ? op.plane : "xy";
+    const sk: SketchFeature = {
+      id: "__sketchPlaneRef__",
+      name: "__sketchPlaneRef__",
+      type: "sketch",
+      parameters: { plane: pl, planeOffset: po, planeRef: ref },
+    };
+    const basis = getSketchPlaneBasis(sk);
+    const n = basis.n;
+    const u = basis.u;
+    const shift = startOffset;
+    const origin: [number, number, number] = [
+      basis.origin[0] + n[0] * shift,
+      basis.origin[1] + n[1] * shift,
+      basis.origin[2] + n[2] * shift,
+    ];
+    return new Plane(origin, u, n);
+  }
+
+  if (ref?.type === "face" && ref.normal) {
+    const [nx, ny, nz] = ref.normal;
+    const len = Math.hypot(nx, ny, nz);
+    if (len >= 1e-12) {
+      const n = normalize3([nx, ny, nz]);
+      const t = ref.faceOffset + startOffset;
+      const origin: [number, number, number] = [n[0] * t, n[1] * t, n[2] * t];
+      const helper: [number, number, number] = Math.abs(n[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+      const u = normalize3(cross3(helper, n));
+      return new Plane(origin, u, n);
+    }
+  }
+
+  const plane =
+    ref?.type === "defaultPlane" ? ref.name : (op.plane || "xy");
+  const kb = kernelPlaneOffset(plane, po);
+  const eff = kb + startOffset;
+
+  if (plane === "xz") {
+    return new Plane([0, eff, 0], [1, 0, 0], [0, 1, 0]);
+  }
+  if (plane === "yz") {
+    return new Plane([eff, 0, 0], [0, 1, 0], [1, 0, 0]);
+  }
+  return new Plane([0, 0, eff], [1, 0, 0], [0, 0, 1]);
+}
+
+function worldRevolveAxisDirection(axis: "x" | "y" | "z"): [number, number, number] {
+  if (axis === "x") return [1, 0, 0];
+  if (axis === "y") return [0, 1, 0];
+  return [0, 0, 1];
+}
+
 function sketchToSolids(op: SketchBooleanFeatureInput): Shape3D[] {
   const sd = op.sketchData;
   if (!sd?.points?.length) return [];
@@ -370,6 +456,48 @@ function sketchToSolids(op: SketchBooleanFeatureInput): Shape3D[] {
       results.push(solid);
     } catch (e) {
       console.warn("Failed to build loop solid:", e);
+    }
+  }
+
+  return results;
+}
+
+function sketchToRevolveSolids(op: RevolveFeatureInput): Shape3D[] {
+  const sd = op.sketchData;
+  if (!sd?.points?.length) return [];
+  const rpPlane = getReplicadSketchPlaneForRevolve({
+    plane: op.plane,
+    planeOffset: op.planeOffset,
+    planeRef: op.planeRef,
+    startOffset: Number(op.startOffset) || 0,
+  });
+  const rawAngle = Math.abs(Number(op.angle) || 360);
+  const angleDeg = Math.min(Math.max(rawAngle, 0.001), 360);
+  const axisDir = worldRevolveAxisDirection(op.axis);
+
+  const results: Shape3D[] = [];
+  const regionDrawings = buildFilledRegionDrawings(sd);
+  for (const drawing of regionDrawings) {
+    let sk: any = null;
+    let fc: any = null;
+    try {
+      sk = drawing.sketchOnPlane(rpPlane);
+      fc = sk.face();
+      const solid = revolution(fc, sk.defaultOrigin, axisDir, angleDeg) as Shape3D;
+      results.push(solid);
+    } catch (e) {
+      console.warn("Failed to build revolve solid:", e);
+    } finally {
+      try {
+        fc?.delete?.();
+      } catch {
+        /* ignore */
+      }
+      try {
+        sk?.delete?.();
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -454,7 +582,21 @@ export interface SketchBooleanFeatureInput {
   startOffset: number;
   planeOffset: number;
   /** When set (from sketch feature), extrude/cut uses this plane instead of axis-aligned `plane` only. */
-  planeRef?: Extract<GeometricSelectionRef, { type: "defaultPlane" | "face" }> | null;
+  planeRef?: Extract<GeometricSelectionRef, { type: "defaultPlane" | "face" | "plane" }> | null;
+}
+
+/** Same sketch placement inputs as extrude/cut; revolution uses {@link revolution} with angle (degrees). */
+export interface RevolveFeatureInput {
+  id: string;
+  name: string;
+  type: "revolve" | "revolveCut";
+  sketchData: SketchData;
+  plane: string;
+  planeOffset: number;
+  startOffset: number;
+  planeRef?: Extract<GeometricSelectionRef, { type: "defaultPlane" | "face" | "plane" }> | null;
+  angle: number;
+  axis: "x" | "y" | "z";
 }
 
 export interface EdgeBlendFeatureInput {
@@ -467,7 +609,7 @@ export interface EdgeBlendFeatureInput {
   selectedEdgeBoxes: { min: [number, number, number]; max: [number, number, number] }[];
 }
 
-export type FeatureInput = SketchBooleanFeatureInput | EdgeBlendFeatureInput;
+export type FeatureInput = SketchBooleanFeatureInput | RevolveFeatureInput | EdgeBlendFeatureInput;
 
 function buildAccumShapes(features: FeatureInput[]): { shape: Shape3D; featureId: string; featureName: string }[] {
   let accumShapes: { shape: Shape3D; featureId: string; featureName: string }[] = [];
@@ -588,6 +730,75 @@ function buildAccumShapes(features: FeatureInput[]): { shape: Shape3D; featureId
         accumShapes[targetIdx] = { shape: blended, featureId: feat.id, featureName: feat.name };
       } catch (e) {
         console.warn(`CSG ${feat.type} failed:`, e);
+      }
+      continue;
+    }
+    if (feat.type === "revolve" || feat.type === "revolveCut") {
+      const rop = feat as RevolveFeatureInput;
+      console.log("[CAD][BuildAccum][FeatureStart]", {
+        id: rop.id,
+        name: rop.name,
+        type: rop.type,
+        plane: rop.plane,
+        planeOffset: rop.planeOffset,
+        angle: rop.angle,
+        axis: rop.axis,
+        startOffset: rop.startOffset,
+      });
+      const toolSolids = sketchToRevolveSolids(rop);
+      console.log("[CAD][BuildAccum][ToolSolids]", {
+        featureId: rop.id,
+        count: toolSolids.length,
+      });
+      if (toolSolids.length === 0) continue;
+
+      if (feat.type === "revolveCut") {
+        for (let ti = 0; ti < toolSolids.length; ti++) {
+          const tool = toolSolids[ti];
+          const toolBox = shapeBBox(tool);
+          accumShapes = accumShapes.map((item) => {
+            try {
+              const baseBox = shapeBBox(item.shape);
+              if (overlapVolume(baseBox, toolBox) <= 0) return item;
+              const result = item.shape.cut(tool) as Shape3D;
+              return { ...item, shape: result };
+            } catch (e) {
+              console.warn("CSG cut failed (revolve cut):", e);
+              return item;
+            }
+          });
+        }
+        continue;
+      }
+
+      for (const s of toolSolids) {
+        if (!accumShapes.length) {
+          accumShapes.push({ shape: s, featureId: rop.id, featureName: rop.name });
+          continue;
+        }
+        const sBox = shapeBBox(s);
+        let bestIdx = -1;
+        let bestOverlap = -1;
+        for (let i = 0; i < accumShapes.length; i++) {
+          const baseBox = shapeBBox(accumShapes[i].shape);
+          if (!boxesTouchOrOverlap(baseBox, sBox)) continue;
+          const ov = overlapVolume(baseBox, sBox);
+          if (ov > bestOverlap) {
+            bestOverlap = ov;
+            bestIdx = i;
+          }
+        }
+        if (bestIdx >= 0) {
+          try {
+            const fused = accumShapes[bestIdx].shape.fuse(s) as Shape3D;
+            accumShapes[bestIdx] = { shape: fused, featureId: rop.id, featureName: rop.name };
+          } catch (e) {
+            console.warn("CSG fuse failed (revolve), keeping separate body:", e);
+            accumShapes.push({ shape: s, featureId: rop.id, featureName: rop.name });
+          }
+        } else {
+          accumShapes.push({ shape: s, featureId: rop.id, featureName: rop.name });
+        }
       }
       continue;
     }

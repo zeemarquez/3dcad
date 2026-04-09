@@ -3,6 +3,8 @@ import type {
   SketchFeature,
   ExtrudeFeature,
   CutFeature,
+  RevolveFeature,
+  RevolveCutFeature,
   FilletFeature,
   ChamferFeature,
 } from '../store/useCadStore';
@@ -51,6 +53,32 @@ export function featuresToCadFeatureInputs(sourceFeatures: Feature[]): FeatureIn
         startOffset: Number(startOffset) || 0,
         planeOffset: sketchOffset,
         planeRef,
+      });
+    } else if (feature.type === 'revolve' || feature.type === 'revolveCut') {
+      const rf = feature as RevolveFeature | RevolveCutFeature;
+      const sketch = sketchMap.get(rf.parameters.sketchId);
+      const sd = sketch?.parameters?.sketchData;
+      if (!sd) continue;
+      const plane = sketch?.parameters?.plane ?? 'xy';
+      const sketchOffset = Number(sketch?.parameters?.planeOffset) || 0;
+      const planeRef = sketch?.parameters?.planeRef ?? null;
+      const ax = rf.parameters.axis;
+      const axis: 'x' | 'y' | 'z' =
+        ax === 'x' || ax === 'y' || ax === 'z' ? ax : 'z';
+      const angle = Math.max(Math.abs(Number(rf.parameters.angle) || 360), 0.001);
+      const startOff = Number(rf.parameters.startOffset) || 0;
+
+      featureInputs.push({
+        id: feature.id,
+        name: feature.name,
+        type: feature.type === 'revolveCut' ? 'revolveCut' : 'revolve',
+        sketchData: sd as any,
+        plane,
+        planeOffset: sketchOffset,
+        planeRef,
+        startOffset: startOff,
+        angle,
+        axis,
       });
     } else if (feature.type === 'fillet' || feature.type === 'chamfer') {
       const bf = feature as FilletFeature | ChamferFeature;

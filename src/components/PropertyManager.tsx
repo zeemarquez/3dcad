@@ -8,6 +8,7 @@ import {
   type AxisFeature,
   type CutFeature,
   type RevolveFeature,
+  type RevolveCutFeature,
   type FilletFeature,
   type ChamferFeature,
   type Feature,
@@ -22,6 +23,11 @@ const inputCls =
   'w-full bg-white border border-zinc-300 rounded py-1.5 px-2.5 text-sm text-zinc-900 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500';
 const labelCls = 'block text-xs font-medium text-zinc-600 mb-1.5';
 const sectionCls = 'space-y-3';
+
+function formatCommandLabel(cmd: string): string {
+  if (cmd === 'revolveCut') return 'Revolve cut';
+  return cmd.charAt(0).toUpperCase() + cmd.slice(1);
+}
 
 function evaluateInputExpression(
   raw: string,
@@ -299,6 +305,7 @@ const ToggleRow: React.FC<ToggleRowProps> = ({ label, icon: Icon, checked, onCha
 function geoRefToPlaneAndOffset(ref: GeometricSelectionRef | null): { plane: 'xy' | 'xz' | 'yz'; offset: number } {
   if (!ref) return { plane: 'xy', offset: 0 };
   if (ref.type === 'defaultPlane') return { plane: ref.name, offset: 0 };
+  if (ref.type === 'plane') return { plane: 'xy', offset: 0 };
   if (ref.type === 'face') {
     const [nx, ny, nz] = ref.normal;
     const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
@@ -324,8 +331,8 @@ function planeToRef(plane: 'xy' | 'xz' | 'yz'): GeometricSelectionRef {
   return { type: 'defaultPlane', name: plane, label: labels[plane] };
 }
 
-function isPlaneRef(ref: GeometricSelectionRef | null): ref is Extract<GeometricSelectionRef, { type: 'defaultPlane' | 'face' }> {
-  return !!ref && (ref.type === 'defaultPlane' || ref.type === 'face');
+function isPlaneRef(ref: GeometricSelectionRef | null): ref is Extract<GeometricSelectionRef, { type: 'defaultPlane' | 'face' | 'plane' }> {
+  return !!ref && (ref.type === 'defaultPlane' || ref.type === 'face' || ref.type === 'plane');
 }
 function isPointRef(ref: GeometricSelectionRef | null): ref is Extract<GeometricSelectionRef, { type: 'point' }> {
   return !!ref && ref.type === 'point';
@@ -454,8 +461,8 @@ export const PropertyManager = () => {
   const solidTargetFeatures = useMemo(
     () =>
       features.filter(
-        (f): f is Extract<Feature, { type: 'extrude' | 'cut' | 'revolve' | 'fillet' | 'chamfer' }> =>
-          ['extrude', 'cut', 'revolve', 'fillet', 'chamfer'].includes(f.type)
+        (f): f is Extract<Feature, { type: 'extrude' | 'cut' | 'revolve' | 'revolveCut' | 'fillet' | 'chamfer' }> =>
+          ['extrude', 'cut', 'revolve', 'revolveCut', 'fillet', 'chamfer'].includes(f.type)
       ),
     [features]
   );
@@ -568,10 +575,11 @@ export const PropertyManager = () => {
       defaults.planeRef = null;
       defaults.planeRefA = null;
       defaults.planeRefB = null;
-    } else if (activeCommand === 'revolve') {
+    } else if (activeCommand === 'revolve' || activeCommand === 'revolveCut') {
       defaults.sketchId = resolveSketchId(preferredSketchId);
       defaults.angle = 360;
       defaults.axis = 'z';
+      defaults.startOffset = 0;
     } else if (activeCommand === 'fillet') {
       defaults.targetFeatureId = commandPreselection ?? solidTargetFeatures[solidTargetFeatures.length - 1]?.id ?? '';
       defaults.radius = 1;
@@ -605,7 +613,7 @@ export const PropertyManager = () => {
       return;
     }
     const id = '__preview__';
-    const name = `${activeCommand.charAt(0).toUpperCase() + activeCommand.slice(1)} Preview`;
+    const name = `${formatCommandLabel(activeCommand)} Preview`;
     const num = (v: unknown, fallback: number) => {
       const n = Number(v);
       return Number.isFinite(n) ? n : fallback;
@@ -648,15 +656,16 @@ export const PropertyManager = () => {
       setTransientPreviewFeature(preview);
       return;
     }
-    if (activeCommand === 'revolve') {
+    if (activeCommand === 'revolve' || activeCommand === 'revolveCut') {
       const preview: Feature = {
         id,
         name,
-        type: 'revolve',
+        type: activeCommand === 'revolveCut' ? 'revolveCut' : 'revolve',
         parameters: {
           sketchId: resolveSketchId(np.sketchId),
           angle: num(np.angle, 360),
           axis: (np.axis === 'x' || np.axis === 'y' || np.axis === 'z') ? np.axis : 'z',
+          startOffset: num(np.startOffset, 0),
         },
       };
       const sig = JSON.stringify(preview);
@@ -718,7 +727,7 @@ export const PropertyManager = () => {
   if (activeModule === 'sketch') return null;
   if (!activeFeature && !activeCommand) return null;
 
-  const title = activeFeature ? activeFeature.name : `New ${activeCommand}`;
+  const title = activeFeature ? activeFeature.name : `New ${formatCommandLabel(activeCommand)}`;
 
   const closeDialog = () => {
     setSelectedFeatureId(null);
@@ -736,7 +745,7 @@ export const PropertyManager = () => {
     };
 
     const id = `f${Date.now()}`;
-    const name = `${activeCommand.charAt(0).toUpperCase() + activeCommand.slice(1)} ${features.length + 1}`;
+    const name = `${formatCommandLabel(activeCommand)} ${features.length + 1}`;
     let feature: Feature | null = null;
     const axisLineFromFeatureId = (axisFeatureId: string | null | undefined): { p: [number, number, number]; d: [number, number, number] } | null => {
       if (!axisFeatureId) return null;
@@ -821,7 +830,7 @@ export const PropertyManager = () => {
         const planeRef = isPlaneRef(np.planeRef ?? null) ? np.planeRef : planeToRef(plane);
         // Face plane position is fully defined by planeRef (normal + faceOffset). Storing
         // geoRefToPlaneAndOffset's `offset` would duplicate that distance when rendering.
-        const planeOffset = planeRef.type === 'face' ? 0 : offset;
+        const planeOffset = planeRef.type === 'face' || planeRef.type === 'plane' ? 0 : offset;
         console.log('[CAD][CreateSketch]', {
           sourceRef: planeRef,
           resolvedPlane: plane,
@@ -1023,20 +1032,26 @@ export const PropertyManager = () => {
         }
         break;
       case 'revolve':
+      case 'revolveCut':
         {
           const sketchId = resolveSketchId(np.sketchId);
           console.log('[CAD][ResolveSketchForFeature]', {
-            featureType: 'revolve',
+            featureType: activeCommand,
             candidate: np.sketchId ?? null,
             commandPreselection,
             preferredSketchId,
             resolved: sketchId,
           });
           const angle = parseOrStop(String(np.angle ?? 360));
-          if (!Number.isFinite(angle)) return;
+          const startOffset = parseOrStop(String(np.startOffset ?? 0));
+          if (!Number.isFinite(angle) || !Number.isFinite(startOffset)) return;
+          const axis: 'x' | 'y' | 'z' =
+            np.axis === 'x' || np.axis === 'y' || np.axis === 'z' ? np.axis : 'z';
           feature = {
-            id, name, type: 'revolve',
-            parameters: { sketchId, angle, axis: np.axis || 'z' },
+            id,
+            name,
+            type: activeCommand === 'revolveCut' ? 'revolveCut' : 'revolve',
+            parameters: { sketchId, angle, axis, startOffset },
           };
         }
         break;
@@ -1100,9 +1115,12 @@ export const PropertyManager = () => {
         if (String(np.offset ?? '').trim().startsWith('=')) {
           linkDimensionExpression({ kind: 'feature', featureId: feature.id, param: 'offset' }, String(np.offset).trim());
         }
-      } else if (feature.type === 'revolve') {
+      } else if (feature.type === 'revolve' || feature.type === 'revolveCut') {
         if (String(np.angle ?? '').trim().startsWith('=')) {
           linkDimensionExpression({ kind: 'feature', featureId: feature.id, param: 'angle' }, String(np.angle).trim());
+        }
+        if (String(np.startOffset ?? '').trim().startsWith('=')) {
+          linkDimensionExpression({ kind: 'feature', featureId: feature.id, param: 'startOffset' }, String(np.startOffset).trim());
         }
       } else if (feature.type === 'fillet') {
         if (String(np.radius ?? '').trim().startsWith('=')) {
@@ -1611,7 +1629,7 @@ export const PropertyManager = () => {
                 onChange={(ref) => {
                   const r = geoRefToPlaneAndOffset(ref);
                   updateFeatureParameter(activeFeature.id, 'plane', r.plane);
-                  updateFeatureParameter(activeFeature.id, 'planeOffset', ref.type === 'face' ? 0 : r.offset);
+                  updateFeatureParameter(activeFeature.id, 'planeOffset', ref.type === 'face' || ref.type === 'plane' ? 0 : r.offset);
                   if (isPlaneRef(ref)) {
                     updateFeatureParameter(activeFeature.id, 'planeRef', ref);
                   }
@@ -1645,8 +1663,10 @@ export const PropertyManager = () => {
               ))}
             </div>
           );
-        case 'revolve': {
-          const feat = activeFeature as RevolveFeature;
+        case 'revolve':
+        case 'revolveCut': {
+          const feat = activeFeature as RevolveFeature | RevolveCutFeature;
+          const so = feat.parameters.startOffset ?? 0;
           return (
             <div className={sectionCls}>
               <div>
@@ -1683,6 +1703,28 @@ export const PropertyManager = () => {
                   }}
                   suggestions={parameterNames.filter((n) => n !== getFeatureTargetParamName(activeFeature.id, 'angle'))}
                   evaluate={(raw) => evaluateInputExpression(raw, expressionEnv, getFeatureTargetParamName(activeFeature.id, 'angle') ?? undefined)}
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Start Offset (mm)</label>
+                <ExpressionNumberInput
+                  value={editFields[`${activeFeature.id}:startOffset`] ?? getLinkedExpression(activeFeature.id, 'startOffset', so)}
+                  onValueChange={(v) => setEditFields((s) => ({ ...s, [`${activeFeature.id}:startOffset`]: v }))}
+                  onCommit={(raw) => {
+                    const n = evaluateFeatureTargetValue(raw, activeFeature.id, 'startOffset');
+                    if (n !== null) {
+                      updateFeatureParameter(activeFeature.id, 'startOffset', n);
+                      setEditFields((s) => ({ ...s, [`${activeFeature.id}:startOffset`]: raw.trim().startsWith('=') ? raw.trim() : String(n) }));
+                      if (raw.trim().startsWith('=')) {
+                        linkDimensionExpression(
+                          { kind: 'feature', featureId: activeFeature.id, param: 'startOffset' },
+                          raw.trim()
+                        );
+                      }
+                    }
+                  }}
+                  suggestions={parameterNames.filter((n) => n !== getFeatureTargetParamName(activeFeature.id, 'startOffset'))}
+                  evaluate={(raw) => evaluateInputExpression(raw, expressionEnv, getFeatureTargetParamName(activeFeature.id, 'startOffset') ?? undefined)}
                 />
               </div>
             </div>
@@ -1903,6 +1945,7 @@ export const PropertyManager = () => {
       case 'axis':
         return AxisFields({ isNew: true });
       case 'revolve':
+      case 'revolveCut':
         return (
           <div className={sectionCls}>
             <SketchInput
@@ -1928,6 +1971,19 @@ export const PropertyManager = () => {
                 onCommit={(raw) => {
                   const n = evaluateToNumber(raw);
                   if (n !== null && !raw.trim().startsWith('=')) updateNp({ angle: String(n) });
+                }}
+                suggestions={parameterNames}
+                evaluate={evalExpressionPreview}
+              />
+            </div>
+            <div>
+              <label className={labelCls}>Start Offset (mm)</label>
+              <ExpressionNumberInput
+                value={String(np.startOffset ?? 0)}
+                onValueChange={(v) => updateNp({ startOffset: v })}
+                onCommit={(raw) => {
+                  const n = evaluateToNumber(raw);
+                  if (n !== null && !raw.trim().startsWith('=')) updateNp({ startOffset: String(n) });
                 }}
                 suggestions={parameterNames}
                 evaluate={evalExpressionPreview}

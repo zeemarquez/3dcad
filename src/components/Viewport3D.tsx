@@ -1,5 +1,5 @@
 import React, { useMemo, useState, useCallback, useEffect, useRef } from 'react';
-import { Canvas, useThree, type ThreeEvent } from '@react-three/fiber';
+import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, Grid, Line } from '@react-three/drei';
 import {
   useCadStore,
@@ -117,11 +117,12 @@ function faceRefMatchesMeshFace(
 function selectionHintObjectLabel(mode: PartViewportMode): string {
   if (mode.type !== 'selection') return 'object';
   const a = new Set(mode.allowed);
-  const all: PartViewportGeometryKind[] = ['sketch', 'face', 'edge', 'point', 'defaultPlane'];
+  const all: PartViewportGeometryKind[] = ['sketch', 'face', 'edge', 'point', 'defaultPlane', 'plane'];
   if (a.size >= all.length) return 'object';
   if (a.has('edge') && a.size === 1) return 'edge';
   if (a.has('sketch') && a.size === 1) return 'sketch';
   if (a.has('point') && a.size === 1) return 'point';
+  if (a.has('face') && a.has('defaultPlane') && a.has('plane') && a.size === 3) return 'plane or face';
   if (a.has('face') && a.has('defaultPlane') && a.size === 2) return 'plane or face';
   return 'object';
 }
@@ -430,7 +431,7 @@ const FaceMesh: React.FC<FaceMeshProps> = ({
   return (
     <mesh
       geometry={face.geo}
-      userData={selectable ? { pickType: 'brepFace', face, featureId, featureName } : {}}
+      userData={selectable ? ({ pickType: 'brepFace', face, featureId, featureName } satisfies FacePickData) : {}}
       onPointerOver={(e) => { e.stopPropagation(); if (selectable) { setHovered(true); onHoverStart(); } }}
       onPointerOut={(e) => { e.stopPropagation(); if (selectable) { setHovered(false); onHoverEnd(); } }}
       onClick={(e) => {
@@ -652,15 +653,15 @@ const CADSolids = () => {
       const selectedFeature = selectedIndex >= 0 ? features[selectedIndex] : null;
       const editableSolidFeature =
         !!selectedFeature &&
-        ['extrude', 'cut', 'revolve', 'fillet', 'chamfer'].includes(selectedFeature.type);
+        ['extrude', 'cut', 'revolve', 'revolveCut', 'fillet', 'chamfer'].includes(selectedFeature.type);
       const canPreviewCreate =
         !selectedFeature &&
         !!activeCommand &&
-        ['extrude', 'cut', 'revolve', 'fillet', 'chamfer'].includes(activeCommand) &&
+        ['extrude', 'cut', 'revolve', 'revolveCut', 'fillet', 'chamfer'].includes(activeCommand) &&
         !!transientPreviewFeature;
       if (editableSolidFeature && selectedFeature) {
         const opType = selectedFeature.type;
-        setPreviewColor(['cut', 'fillet', 'chamfer'].includes(opType) ? '#f87171' : '#86efac');
+        setPreviewColor(['cut', 'revolveCut', 'fillet', 'chamfer'].includes(opType) ? '#f87171' : '#86efac');
         const beforeInputs = toFeatureInputs(features.slice(0, selectedIndex));
         const before = buildAllSolids(beforeInputs);
         const afterInputs = toFeatureInputs(features.slice(0, selectedIndex + 1));
@@ -668,7 +669,7 @@ const CADSolids = () => {
         setBeforeSolids(before);
         setPreviewSolids(preview);
       } else if (canPreviewCreate && transientPreviewFeature) {
-        setPreviewColor(['cut', 'fillet', 'chamfer'].includes(activeCommand ?? '') ? '#f87171' : '#86efac');
+        setPreviewColor(['cut', 'revolveCut', 'fillet', 'chamfer'].includes(activeCommand ?? '') ? '#f87171' : '#86efac');
         const beforeInputs = toFeatureInputs(features);
         const before = buildAllSolids(beforeInputs);
         const afterInputs = toFeatureInputs([...features, transientPreviewFeature]);
@@ -1210,14 +1211,31 @@ const USER_PLANE_VIS_SIZE = 20;
 
 /** User-defined construction planes (offset / three points) — same role as AxisFeatures / PointFeatures. */
 const PlaneFeatures = () => {
-  const features = useCadStore((s) => s.features);
-  const hiddenGeometryIds = useCadStore((s) => s.hiddenGeometryIds);
+  const { features, hiddenGeometryIds, captureGeometricSelection, selectionResetToken, activeInputOptions } =
+    useCadStore();
+  const partViewportMode = usePartViewportMode();
+  const allowPlaneFeatureSelection =
+    partViewportMode.type === 'selection' && partViewportMode.allowed.includes('plane');
+  const [hoveredPlaneId, setHoveredPlaneId] = useState<string | null>(null);
+  const [selectedPlaneId, setSelectedPlaneId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setHoveredPlaneId(null);
+    setSelectedPlaneId(null);
+  }, [selectionResetToken]);
+
+  useEffect(() => {
+    if (!allowPlaneFeatureSelection) return;
+    const pre = activeInputOptions?.preselected;
+    const pl = pre?.find((r): r is Extract<GeometricSelectionRef, { type: 'plane' }> => r.type === 'plane');
+    if (pl) setSelectedPlaneId(pl.featureId);
+  }, [allowPlaneFeatureSelection, activeInputOptions?.preselected]);
 
   const items = useMemo(() => {
     const pointById = new Map<string, PointFeature>(
       features.filter((f): f is PointFeature => f.type === 'point' && f.enabled !== false).map((f) => [f.id, f]),
     );
-    const out: { id: string; position: THREE.Vector3; quaternion: THREE.Quaternion }[] = [];
+    const out: { id: string; name: string; position: THREE.Vector3; quaternion: THREE.Quaternion }[] = [];
 
     for (const f of features) {
       if (f.type !== 'plane' || f.enabled === false) continue;
@@ -1260,25 +1278,55 @@ const PlaneFeatures = () => {
         continue;
       }
 
-      out.push({ id: f.id, position: pos, quaternion: quat });
+      out.push({ id: f.id, name: f.name, position: pos, quaternion: quat });
     }
     return out;
   }, [features, hiddenGeometryIds]);
 
   return (
     <>
-      {items.map((it) => (
-        <mesh key={it.id} position={it.position} quaternion={it.quaternion}>
-          <planeGeometry args={[USER_PLANE_VIS_SIZE, USER_PLANE_VIS_SIZE]} />
-          <meshBasicMaterial
-            color="#a855f7"
-            transparent
-            opacity={0.2}
-            side={THREE.DoubleSide}
-            depthWrite={false}
-          />
-        </mesh>
-      ))}
+      {items.map((it) => {
+        const isHovered = hoveredPlaneId === it.id;
+        const isSelected = selectedPlaneId === it.id;
+        const highlight = allowPlaneFeatureSelection && (isHovered || isSelected);
+        return (
+          <mesh
+            key={it.id}
+            position={it.position}
+            quaternion={it.quaternion}
+            renderOrder={2}
+            onPointerOver={(e) => {
+              e.stopPropagation();
+              if (allowPlaneFeatureSelection) setHoveredPlaneId(it.id);
+            }}
+            onPointerOut={(e) => {
+              e.stopPropagation();
+              if (allowPlaneFeatureSelection) setHoveredPlaneId((prev) => (prev === it.id ? null : prev));
+            }}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              if (!allowPlaneFeatureSelection) return;
+              const ref: GeometricSelectionRef = {
+                type: 'plane',
+                featureId: it.id,
+                featureName: it.name,
+                label: `${it.name} — Plane`,
+              };
+              captureGeometricSelection(ref, !!(e.ctrlKey || e.shiftKey || e.metaKey));
+              setSelectedPlaneId(it.id);
+            }}
+          >
+            <planeGeometry args={[USER_PLANE_VIS_SIZE, USER_PLANE_VIS_SIZE]} />
+            <meshBasicMaterial
+              color={highlight ? '#f59e0b' : '#a855f7'}
+              transparent
+              opacity={highlight ? 0.38 : 0.2}
+              side={THREE.DoubleSide}
+              depthWrite={false}
+            />
+          </mesh>
+        );
+      })}
     </>
   );
 };
@@ -1306,33 +1354,16 @@ const AXIS_LINES = [
 ];
 
 const DefaultPlanes = () => {
-  const { activeInputField, captureGeometricSelection, showOriginPlanes, hiddenGeometryIds, activeInputOptions } =
+  const { captureGeometricSelection, showOriginPlanes, hiddenGeometryIds, activeInputOptions } =
     useCadStore();
   const [hovPlane, setHovPlane] = useState<string | null>(null);
-  const { scene } = useThree();
   const partViewportMode = usePartViewportMode();
   const allowDefaultPlane =
     partViewportMode.type === 'selection' && partViewportMode.allowed.includes('defaultPlane');
   const preselectedDefaultPlaneName = activeInputOptions?.preselected?.find(
     (r): r is Extract<GeometricSelectionRef, { type: 'defaultPlane' }> => r.type === 'defaultPlane',
   )?.name;
-  const sketchPlanePickMode = activeInputField === 'sketchPlane' || activeInputField === 'sketchPlaneEdit';
-  const selectFaceIfHit = useCallback(
-    (e: any) => {
-      const hits = e?.raycaster?.intersectObjects(scene.children, true) ?? [];
-      if (!hits.length) return false;
-      const faceHit = hits.find((hit: any) => hit?.object?.userData?.pickType === 'brepFace');
-      if (!faceHit) return false;
-      const pick = faceHit.object.userData as FacePickData;
-      if (!pick?.face) return false;
-      const ref = buildFaceSelectionRef(pick.face, pick.featureId, pick.featureName, faceHit.point?.clone?.());
-      captureGeometricSelection(ref, !!(e.ctrlKey || e.shiftKey || e.metaKey));
-      return true;
-    },
-    [captureGeometricSelection, scene],
-  );
 
-  // Respect the global plane visibility toggle in all modes.
   const showPlanes = showOriginPlanes;
 
   return (
@@ -1355,26 +1386,13 @@ const DefaultPlanes = () => {
       {PLANE_CFG.map(({ name, color, rot }) => (
         (() => {
           const planeId = `origin-${name}`;
-          const needsPlanesForInput =
-            partViewportMode.type === 'selection' &&
-            (allowDefaultPlane || sketchPlanePickMode);
-          const planeVisible = needsPlanesForInput || (!hiddenGeometryIds.includes(planeId) && showPlanes);
+          const planeVisible = (allowDefaultPlane) || (!hiddenGeometryIds.includes(planeId) && showPlanes);
           return (
         <mesh
           key={name}
           rotation={rot as any}
           visible={planeVisible}
-          raycast={sketchPlanePickMode ? () => null : undefined}
           onPointerDown={(e) => {
-            if (sketchPlanePickMode) return;
-            if (
-              partViewportMode.type === 'selection' &&
-              partViewportMode.allowed.includes('face') &&
-              selectFaceIfHit(e)
-            ) {
-              e.stopPropagation();
-              return;
-            }
             e.stopPropagation();
             if (partViewportMode.type === 'selection' && allowDefaultPlane) {
               captureGeometricSelection({
@@ -1384,8 +1402,8 @@ const DefaultPlanes = () => {
               }, !!(e.ctrlKey || e.shiftKey || e.metaKey));
             }
           }}
-          onPointerOver={() => { if (allowDefaultPlane) setHovPlane(name); }}
-          onPointerOut={() => { if (allowDefaultPlane) setHovPlane(null); }}
+          onPointerOver={(e) => { e.stopPropagation(); if (allowDefaultPlane) setHovPlane(name); }}
+          onPointerOut={(e) => { e.stopPropagation(); if (allowDefaultPlane) setHovPlane(null); }}
         >
           <planeGeometry args={[PLANE_SIZE, PLANE_SIZE]} />
           <meshBasicMaterial
@@ -1539,7 +1557,6 @@ const FloorGrid = () => {
 export const Viewport3D = () => {
   const setSelectedPlane = useCadStore((s) => s.setSelectedPlane);
   const activeInputField = useCadStore((s) => s.activeInputField);
-  const captureGeometricSelection = useCadStore((s) => s.captureGeometricSelection);
   const deactivateGeometricInput = useCadStore((s) => s.deactivateGeometricInput);
   const setLastGeometricSelection = useCadStore((s) => s.setLastGeometricSelection);
   const triggerSelectionReset = useCadStore((s) => s.triggerSelectionReset);
@@ -1566,17 +1583,6 @@ export const Viewport3D = () => {
       <SelectionHint />
       <Canvas
         camera={{ position: [30, 30, 30], fov: 45 }}
-        onPointerDown={(e: ThreeEvent<PointerEvent>) => {
-          const sketchPlanePickMode = activeInputField === 'sketchPlane' || activeInputField === 'sketchPlaneEdit';
-          if (!sketchPlanePickMode) return;
-          const faceHit = e.intersections.find((hit: any) => hit?.object?.userData?.pickType === 'brepFace');
-          if (!faceHit) return;
-          const pick = faceHit.object.userData as FacePickData;
-          if (!pick?.face) return;
-          const ref = buildFaceSelectionRef(pick.face, pick.featureId, pick.featureName, faceHit.point?.clone?.());
-          captureGeometricSelection(ref, !!(e.ctrlKey || e.shiftKey || e.metaKey));
-          e.stopPropagation();
-        }}
         onPointerMissed={() => {
           if (activeInputField) {
             deactivateGeometricInput();

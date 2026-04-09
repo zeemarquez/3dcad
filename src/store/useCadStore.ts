@@ -5,10 +5,22 @@ import { useSketchStore } from './useSketchStore';
 // Types
 // ──────────────────────────────────────────────────────────────────────────────
 
-export type FeatureType = 'sketch' | 'extrude' | 'plane' | 'point' | 'axis' | 'cut' | 'revolve' | 'fillet' | 'chamfer';
+export type FeatureType =
+  | 'sketch'
+  | 'extrude'
+  | 'plane'
+  | 'point'
+  | 'axis'
+  | 'cut'
+  | 'revolve'
+  | 'revolveCut'
+  | 'fillet'
+  | 'chamfer';
 
 export type GeometricSelectionRef =
   | { type: 'defaultPlane'; name: 'xy' | 'xz' | 'yz'; label: string }
+  /** User-defined construction plane feature */
+  | { type: 'plane'; featureId: string; featureName: string; label: string }
   | { type: 'face'; featureId: string; featureName: string; normal: [number, number, number]; faceOffset: number; label: string }
   | { type: 'point'; featureId: string; featureName: string; position: [number, number, number]; label: string }
   | { type: 'sketch'; featureId: string; featureName: string; label: string }
@@ -53,7 +65,7 @@ export interface SketchFeature extends BaseFeature {
   parameters: {
     plane: 'xy' | 'xz' | 'yz';
     planeOffset: number;
-    planeRef?: Extract<GeometricSelectionRef, { type: 'defaultPlane' | 'face' }> | null;
+    planeRef?: Extract<GeometricSelectionRef, { type: 'defaultPlane' | 'face' | 'plane' }> | null;
     sketchData?: SketchData;
   };
 }
@@ -128,7 +140,23 @@ export interface AxisFeature extends BaseFeature {
 
 export interface RevolveFeature extends BaseFeature {
   type: 'revolve';
-  parameters: { sketchId: string; angle: number; axis: 'x' | 'y' | 'z' };
+  parameters: {
+    sketchId: string;
+    angle: number;
+    axis: 'x' | 'y' | 'z';
+    /** Offset along sketch plane normal (mm), same convention as extrude. */
+    startOffset?: number;
+  };
+}
+
+export interface RevolveCutFeature extends BaseFeature {
+  type: 'revolveCut';
+  parameters: {
+    sketchId: string;
+    angle: number;
+    axis: 'x' | 'y' | 'z';
+    startOffset?: number;
+  };
 }
 
 export interface FilletFeature extends BaseFeature {
@@ -157,6 +185,7 @@ export type Feature =
   | AxisFeature
   | CutFeature
   | RevolveFeature
+  | RevolveCutFeature
   | FilletFeature
   | ChamferFeature;
 
@@ -430,12 +459,19 @@ function getFeatureDimensionTargets(feature: Feature): Array<{ key: string; valu
         },
       ];
     case 'revolve':
+    case 'revolveCut':
       return [
         {
           key: `${feature.id}:angle`,
           value: feature.parameters.angle,
           dimensionType: 'ANGLE',
           target: { kind: 'feature', featureId: feature.id, param: 'angle' },
+        },
+        {
+          key: `${feature.id}:startOffset`,
+          value: feature.parameters.startOffset ?? 0,
+          dimensionType: 'LENGTH',
+          target: { kind: 'feature', featureId: feature.id, param: 'startOffset' },
         },
       ];
     case 'fillet':
@@ -492,11 +528,23 @@ function targetEquals(a: DimensionParameter['target'], b: DimensionParameter['ta
 }
 
 function isSolidFeatureType(type: FeatureType): boolean {
-  return type === 'extrude' || type === 'cut' || type === 'revolve' || type === 'fillet' || type === 'chamfer';
+  return (
+    type === 'extrude' ||
+    type === 'cut' ||
+    type === 'revolve' ||
+    type === 'revolveCut' ||
+    type === 'fillet' ||
+    type === 'chamfer'
+  );
 }
 
 function getFeatureDependencyIds(feature: Feature): string[] {
-  if (feature.type === 'extrude' || feature.type === 'cut' || feature.type === 'revolve') {
+  if (
+    feature.type === 'extrude' ||
+    feature.type === 'cut' ||
+    feature.type === 'revolve' ||
+    feature.type === 'revolveCut'
+  ) {
     return feature.parameters.sketchId ? [feature.parameters.sketchId] : [];
   }
   if (feature.type === 'fillet' || feature.type === 'chamfer') {
@@ -717,7 +765,12 @@ export const useCadStore = create<CadState>((set, get) => {
       set((state) => {
         const nextFeatures = [...state.features, { ...feature, enabled: feature.enabled ?? true }];
         let hiddenGeometryIds = state.hiddenGeometryIds;
-        if (feature.type === 'extrude' || feature.type === 'cut' || feature.type === 'revolve') {
+        if (
+          feature.type === 'extrude' ||
+          feature.type === 'cut' ||
+          feature.type === 'revolve' ||
+          feature.type === 'revolveCut'
+        ) {
           const sid = feature.parameters.sketchId;
           if (sid && !hiddenGeometryIds.includes(sid)) {
             hiddenGeometryIds = [...hiddenGeometryIds, sid];
@@ -778,9 +831,13 @@ export const useCadStore = create<CadState>((set, get) => {
       const selectedFeature = state.features.find((f) => f.id === state.selectedFeatureId);
       let preselection: string | null = null;
 
-      if (command && ['extrude', 'cut', 'revolve'].includes(command) && selectedFeature?.type === 'sketch') {
+      if (
+        command &&
+        ['extrude', 'cut', 'revolve', 'revolveCut'].includes(command) &&
+        selectedFeature?.type === 'sketch'
+      ) {
         preselection = selectedFeature.id;
-      } else if (command && ['extrude', 'cut', 'revolve'].includes(command)) {
+      } else if (command && ['extrude', 'cut', 'revolve', 'revolveCut'].includes(command)) {
         // Fallback: pick the most recently created sketch that actually has geometry.
         // This prevents defaulting to the initial empty XY sketch (f1).
         const sketches = state.features.filter((f): f is SketchFeature => f.type === 'sketch');
@@ -804,7 +861,7 @@ export const useCadStore = create<CadState>((set, get) => {
         }
       }
 
-      if (command && ['extrude', 'cut', 'revolve', 'fillet', 'chamfer'].includes(command)) {
+      if (command && ['extrude', 'cut', 'revolve', 'revolveCut', 'fillet', 'chamfer'].includes(command)) {
         console.log('[CAD][SetActiveCommand]', {
           command,
           selectedFeatureId: state.selectedFeatureId,
@@ -884,8 +941,13 @@ export const useCadStore = create<CadState>((set, get) => {
       const cb = _geoSelectionCb;
       if (!keepActive) {
         _geoSelectionCb = null;
-        set({ activeInputField: null, activeInputOptions: null });
       }
+      const planeLike =
+        sel.type === 'defaultPlane' || sel.type === 'face' || sel.type === 'plane';
+      set({
+        ...(!keepActive ? { activeInputField: null, activeInputOptions: null } : {}),
+        ...(planeLike ? { lastGeometricSelection: sel } : {}),
+      });
       if (cb) cb(sel);
     },
 
