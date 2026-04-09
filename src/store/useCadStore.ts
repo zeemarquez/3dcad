@@ -716,9 +716,17 @@ export const useCadStore = create<CadState>((set, get) => {
     addFeature: (feature) => {
       set((state) => {
         const nextFeatures = [...state.features, { ...feature, enabled: feature.enabled ?? true }];
+        let hiddenGeometryIds = state.hiddenGeometryIds;
+        if (feature.type === 'extrude' || feature.type === 'cut' || feature.type === 'revolve') {
+          const sid = feature.parameters.sketchId;
+          if (sid && !hiddenGeometryIds.includes(sid)) {
+            hiddenGeometryIds = [...hiddenGeometryIds, sid];
+          }
+        }
         return {
           features: nextFeatures,
           dimensionParameters: buildDimensionParameters(nextFeatures, state.dimensionParameters),
+          hiddenGeometryIds,
         };
       });
     },

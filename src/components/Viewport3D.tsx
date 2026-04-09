@@ -31,6 +31,12 @@ const C_SEL      = '#f59e0b';
 const C_EDGE     = '#334155';
 const C_EDGE_HOV = '#38bdf8';
 
+/** 3D sketch overlay: filled regions + wire (stronger than legacy 0.22 / #60a5fa) */
+const C_SKETCH_VIEW_FILL = '#2563eb';
+const C_SKETCH_VIEW_FILL_OP = 0.25;
+const C_SKETCH_VIEW_FILL_SEL_OP = 0.50;
+const C_SKETCH_VIEW_LINE = '#1e40af';
+
 /** Max midpoint distance (model units) between stored ref and mesh edge — allows tessellation drift */
 const EDGE_PREFETCH_MID_MAX = 0.04;
 /** Direction vectors must be parallel (same line), |dot| ≥ this */
@@ -1000,9 +1006,13 @@ const SketchWireframes = () => {
               }}
             >
               <meshBasicMaterial
-                color={selectedSketchId === wf.id || hoveredSketchId === wf.id ? C_SEL : '#60a5fa'}
+                color={selectedSketchId === wf.id || hoveredSketchId === wf.id ? C_SEL : C_SKETCH_VIEW_FILL}
                 transparent
-                opacity={selectedSketchId === wf.id || hoveredSketchId === wf.id ? 0.38 : 0.22}
+                opacity={
+                  selectedSketchId === wf.id || hoveredSketchId === wf.id
+                    ? C_SKETCH_VIEW_FILL_SEL_OP
+                    : C_SKETCH_VIEW_FILL_OP
+                }
                 side={THREE.DoubleSide}
                 depthWrite={false}
               />
@@ -1036,7 +1046,7 @@ const SketchWireframes = () => {
               />
             </bufferGeometry>
             <lineBasicMaterial
-              color={selectedSketchId === wf.id || hoveredSketchId === wf.id ? C_SEL : '#60a5fa'}
+              color={selectedSketchId === wf.id || hoveredSketchId === wf.id ? C_SEL : C_SKETCH_VIEW_LINE}
             />
           </lineSegments>
         </group>
@@ -1276,10 +1286,11 @@ const PlaneFeatures = () => {
 // ──────────────────────────────────────────────────────────────────────────────
 // Default Reference Planes + intersection axis lines
 // ──────────────────────────────────────────────────────────────────────────────
+// Plane tint matches the axis normal: XY ⊥ Z (blue), XZ ⊥ Y (green), YZ ⊥ X (red)
 const PLANE_CFG: { name: 'xy' | 'xz' | 'yz'; color: string; rot: [number, number, number] }[] = [
   { name: 'xy', color: '#3b82f6', rot: [0, 0, 0] },
-  { name: 'xz', color: '#ef4444', rot: [Math.PI / 2, 0, 0] },
-  { name: 'yz', color: '#22c55e', rot: [0, Math.PI / 2, 0] },
+  { name: 'xz', color: '#22c55e', rot: [Math.PI / 2, 0, 0] },
+  { name: 'yz', color: '#ef4444', rot: [0, Math.PI / 2, 0] },
 ];
 
 const PLANE_SIZE = 20;
