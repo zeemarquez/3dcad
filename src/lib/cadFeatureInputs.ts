@@ -8,7 +8,8 @@ import type {
   FilletFeature,
   ChamferFeature,
 } from '../store/useCadStore';
-import type { FeatureInput } from './cadEngine';
+import type { FeatureInput, RevolveFeatureInput } from './cadEngine';
+import { getAxisLineFromAxisFeatureId } from './axisFeatureLine';
 
 /**
  * Same ordering and fields as the 3D viewport CAD build — must include fillet/chamfer
@@ -62,11 +63,42 @@ export function featuresToCadFeatureInputs(sourceFeatures: Feature[]): FeatureIn
       const plane = sketch?.parameters?.plane ?? 'xy';
       const sketchOffset = Number(sketch?.parameters?.planeOffset) || 0;
       const planeRef = sketch?.parameters?.planeRef ?? null;
-      const ax = rf.parameters.axis;
-      const axis: 'x' | 'y' | 'z' =
-        ax === 'x' || ax === 'y' || ax === 'z' ? ax : 'z';
       const angle = Math.max(Math.abs(Number(rf.parameters.angle) || 360), 0.001);
       const startOff = Number(rf.parameters.startOffset) || 0;
+
+      const ra = rf.parameters.revolveAxis;
+      let axis: 'x' | 'y' | 'z' = 'z';
+      let revolveAxisMode: RevolveFeatureInput['revolveAxisMode'] = 'world';
+      let edgeAxis: RevolveFeatureInput['edgeAxis'];
+      let axisFeatureLine: RevolveFeatureInput['axisFeatureLine'];
+
+      if (ra?.type === 'edge') {
+        revolveAxisMode = 'edge';
+        axis = 'z';
+        edgeAxis = {
+          direction: [ra.direction[0], ra.direction[1], ra.direction[2]],
+          midpoint: [ra.midpoint[0], ra.midpoint[1], ra.midpoint[2]],
+        };
+      } else if (ra?.type === 'axisFeature') {
+        const line = getAxisLineFromAxisFeatureId(ra.featureId, sourceFeatures);
+        if (line) {
+          revolveAxisMode = 'axisFeature';
+          axis = 'z';
+          axisFeatureLine = line;
+        } else {
+          const ax = rf.parameters.axis;
+          axis = ax === 'x' || ax === 'y' || ax === 'z' ? ax : 'z';
+          revolveAxisMode = 'world';
+          console.warn('[CAD] Revolve axis feature could not be resolved; using world axis', rf.parameters.axis);
+        }
+      } else if (ra?.type === 'worldAxis') {
+        revolveAxisMode = 'world';
+        axis = ra.axis;
+      } else {
+        const ax = rf.parameters.axis;
+        axis = ax === 'x' || ax === 'y' || ax === 'z' ? ax : 'z';
+        revolveAxisMode = 'world';
+      }
 
       featureInputs.push({
         id: feature.id,
@@ -79,6 +111,9 @@ export function featuresToCadFeatureInputs(sourceFeatures: Feature[]): FeatureIn
         startOffset: startOff,
         angle,
         axis,
+        revolveAxisMode,
+        edgeAxis,
+        axisFeatureLine,
       });
     } else if (feature.type === 'fillet' || feature.type === 'chamfer') {
       const bf = feature as FilletFeature | ChamferFeature;

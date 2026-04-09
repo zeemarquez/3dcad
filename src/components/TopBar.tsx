@@ -44,6 +44,7 @@ import {
   FlipHorizontal,
   Undo2,
   Redo2,
+  Waves,
 } from 'lucide-react';
 
 const partIcons = {
@@ -203,12 +204,14 @@ const SketchTools = () => {
   const canRedoSketch = useSketchStore((s) => s.sketchUndoFuture.length > 0);
 
   const hasCurveEntitySelected = selection.some(
-    (s) => s.type === 'line' || s.type === 'circle' || s.type === 'arc'
+    (s) =>
+      s.type === 'line' || s.type === 'circle' || s.type === 'arc' || s.type === 'bspline'
   );
 
   const drawTools = [
     { id: 'line', label: 'Line', icon: Minus },
     { id: 'polyline', label: 'Polyline', icon: Spline },
+    { id: 'bspline', label: 'B-Spline', icon: Waves },
     { id: 'circle', label: 'Circle', icon: Circle },
     { id: 'arc', label: 'Arc', icon: RotateCw },
     { id: 'rectangle', label: 'Rect', icon: Square },

@@ -3,6 +3,7 @@ import { Canvas, useThree } from '@react-three/fiber';
 import { OrbitControls, GizmoHelper, GizmoViewport, Grid, Line } from '@react-three/drei';
 import {
   useCadStore,
+  type Feature,
   type GeometricSelectionRef,
   type SketchFeature,
   type SketchData,
@@ -19,8 +20,20 @@ import {
   type SolidMeshData,
 } from '../lib/cadEngine';
 import { featuresToCadFeatureInputs } from '../lib/cadFeatureInputs';
-import { getSketchPlaneBasis, sketch2DToWorld } from '../lib/sketchPlaneBasis';
+import {
+  getSketchPlaneBasis,
+  sketch2DToWorld,
+  planeEquationFromRef,
+  planeEquationFromPlaneFeature,
+  worldPositionFromPlanePointSlot,
+  worldPositionFromAxisTwoPointSlot,
+} from '../lib/sketchPlaneBasis';
 import { arcSignedSweep, sampleArcPoints } from '../lib/sketchArcPoints';
+import {
+  BSPLINE_DEFAULT_DEGREE,
+  BSPLINE_DEFAULT_SAMPLES_PER_SPAN,
+  sampleOpenUniformBSpline,
+} from '../lib/sketchBspline';
 import { mergeCoincidentSketchVertices, pickNextEdgeInFace, snapClosedPolyline } from '../lib/sketchLoopDetection';
 import {
   usePartViewportMode,
@@ -120,8 +133,11 @@ function faceRefMatchesMeshFace(
 function selectionHintObjectLabel(mode: PartViewportMode): string {
   if (mode.type !== 'selection') return 'object';
   const a = new Set(mode.allowed);
-  const all: PartViewportGeometryKind[] = ['sketch', 'face', 'edge', 'point', 'defaultPlane', 'plane'];
+  const all: PartViewportGeometryKind[] = ['sketch', 'face', 'edge', 'point', 'defaultPlane', 'plane', 'worldAxis', 'axisFeature'];
   if (a.size >= all.length) return 'object';
+  if (a.has('edge') && a.has('worldAxis') && a.has('axisFeature') && a.size === 3) {
+    return 'axis (origin, edge, or axis feature)';
+  }
   if (a.has('edge') && a.size === 1) return 'edge';
   if (a.has('sketch') && a.size === 1) return 'sketch';
   if (a.has('point') && a.size === 1) return 'point';
@@ -218,6 +234,23 @@ function buildFaceSelectionRef(
   };
 }
 
+/**
+ * Translucent origin / construction planes use depthWrite=false and sit at the origin, so the ray
+ * often hits them before a parallel solid face. Intersections are distance-sorted; return the nearest
+ * B-rep face along the ray when the user is allowed to pick faces (e.g. sketch plane).
+ */
+function tryBrepFaceSelectionRefFromIntersections(
+  intersections: THREE.Intersection[],
+): GeometricSelectionRef | null {
+  for (const hit of intersections) {
+    const ud = hit.object.userData as Partial<FacePickData> | undefined;
+    if (ud?.pickType === 'brepFace' && ud.face && ud.featureId && ud.featureName) {
+      return buildFaceSelectionRef(ud.face, ud.featureId, ud.featureName, hit.point);
+    }
+  }
+  return null;
+}
+
 function buildFacesFromMesh(data: SolidMeshData): BRepFace[] {
   const { vertices, normals, triangles, faceGroups } = data;
   const result: BRepFace[] = [];
@@ -306,6 +339,56 @@ function buildEdgesFromMesh(data: SolidMeshData): BRepEdge[] {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// B-Rep vertices — deduped edge endpoints for body point picking
+// ──────────────────────────────────────────────────────────────────────────────
+interface BRepMeshVertex {
+  id: number;
+  position: THREE.Vector3;
+}
+
+const VERTEX_MATCH_TOL_SQ = 0.04 * 0.04;
+
+function buildVerticesFromEdges(edges: BRepEdge[]): BRepMeshVertex[] {
+  const tol = 1e-3;
+  const merged: THREE.Vector3[] = [];
+  for (const e of edges) {
+    if (e.points.length < 2) continue;
+    for (const cand of [e.points[0], e.points[e.points.length - 1]]) {
+      let dup = false;
+      for (const m of merged) {
+        if (m.distanceTo(cand) < tol) {
+          dup = true;
+          break;
+        }
+      }
+      if (!dup) merged.push(cand.clone());
+    }
+  }
+  return merged.map((position, id) => ({ id, position }));
+}
+
+function bestMeshVertexIdForPointRef(
+  ref: Extract<GeometricSelectionRef, { type: 'point' }>,
+  solidFeatureId: string,
+  vertices: BRepMeshVertex[],
+): number | null {
+  if (ref.featureId !== solidFeatureId) return null;
+  let bestId: number | null = null;
+  let bestD = Infinity;
+  for (const v of vertices) {
+    const dx = ref.position[0] - v.position.x;
+    const dy = ref.position[1] - v.position.y;
+    const dz = ref.position[2] - v.position.z;
+    const d = dx * dx + dy * dy + dz * dz;
+    if (d < bestD && d <= VERTEX_MATCH_TOL_SQ) {
+      bestD = d;
+      bestId = v.id;
+    }
+  }
+  return bestId;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // EdgeLine — renders a single B-Rep edge (polyline) as a selectable line
 // ──────────────────────────────────────────────────────────────────────────────
 interface EdgeLineProps {
@@ -362,6 +445,81 @@ const EdgeLine: React.FC<EdgeLineProps> = ({
         renderOrder={2}
       />
     </>
+  );
+};
+
+interface SolidVertexHandleProps {
+  position: THREE.Vector3;
+  hovered: boolean;
+  selected: boolean;
+  inSelMode: boolean;
+  selectable: boolean;
+  preview?: boolean;
+  previewColor?: string;
+  ghost?: boolean;
+  faded?: boolean;
+  onEnter: () => void;
+  onLeave: () => void;
+  onSelect: (ctrlKey: boolean) => void;
+}
+
+const SolidVertexHandle: React.FC<SolidVertexHandleProps> = ({
+  position,
+  hovered,
+  selected,
+  inSelMode,
+  selectable,
+  preview,
+  previewColor,
+  ghost = false,
+  faded = false,
+  onEnter,
+  onLeave,
+  onSelect,
+}) => {
+  const effectiveHover = selectable && hovered;
+  const color = ghost
+    ? '#94a3b8'
+    : preview
+    ? (previewColor ?? '#86efac')
+    : selected
+    ? C_SEL
+    : effectiveHover
+    ? (inSelMode ? C_SEL : C_EDGE_HOV)
+    : C_EDGE;
+  const rVis = effectiveHover || selected ? 0.16 : 0.12;
+  const rPick = 0.42;
+  return (
+    <group position={position}>
+      <mesh
+        renderOrder={1}
+        onPointerOver={(e) => {
+          e.stopPropagation();
+          if (selectable) onEnter();
+        }}
+        onPointerOut={(e) => {
+          e.stopPropagation();
+          if (selectable) onLeave();
+        }}
+        onClick={(e) => {
+          e.stopPropagation();
+          if (selectable) onSelect(!!(e.ctrlKey || e.shiftKey || e.metaKey));
+        }}
+      >
+        <sphereGeometry args={[rPick, 16, 16]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+      </mesh>
+      <mesh renderOrder={2}>
+        <sphereGeometry args={[rVis, 20, 20]} />
+        <meshStandardMaterial
+          color={color}
+          transparent={preview || faded}
+          opacity={preview ? 0.75 : faded ? 0.5 : 1}
+          emissive={effectiveHover || selected ? (ghost ? '#475569' : '#1e293b') : '#000000'}
+          emissiveIntensity={effectiveHover || selected ? 0.2 : 0}
+        />
+      </mesh>
+    </group>
   );
 };
 
@@ -463,10 +621,18 @@ const SolidMesh: React.FC<SolidMeshProps> = ({
   const allowed = partViewportMode.type === 'selection' ? partViewportMode.allowed : [];
   const allowFaceSelection = selectable && inSelectionMode && allowed.includes('face');
   const allowEdgeSelection = selectable && inSelectionMode && allowed.includes('edge');
+  /** Default on for point-only picking; set `allowSolidVertices: false` in options to hide */
+  const allowSolidVertexPick =
+    selectable &&
+    inSelectionMode &&
+    allowed.includes('point') &&
+    activeInputOptions != null &&
+    activeInputOptions.allowSolidVertices !== false;
   const selectionAccentHover = inSelectionMode;
 
   const faces = useMemo(() => buildFacesFromMesh(solidData), [solidData]);
   const edges = useMemo(() => buildEdgesFromMesh(solidData), [solidData]);
+  const meshVertices = useMemo(() => buildVerticesFromEdges(edges), [edges]);
 
   const preselectedRefs = activeInputOptions?.preselected;
   const preselectedEdgeIds = useMemo(() => {
@@ -491,14 +657,29 @@ const SolidMesh: React.FC<SolidMeshProps> = ({
     return ids;
   }, [preselectedRefs, faces, allowFaceSelection, solidData.featureId]);
 
+  const preselectedVertexIds = useMemo(() => {
+    const ids = new Set<number>();
+    if (!preselectedRefs || !allowSolidVertexPick) return ids;
+    for (const r of preselectedRefs) {
+      if (r.type !== 'point') continue;
+      const id = bestMeshVertexIdForPointRef(r, solidData.featureId, meshVertices);
+      if (id !== null) ids.add(id);
+    }
+    return ids;
+  }, [preselectedRefs, meshVertices, allowSolidVertexPick, solidData.featureId]);
+
   const [selFaceId, setSelFaceId] = useState<number | null>(null);
   const [hovEdge, setHovEdge] = useState<number | null>(null);
   const [selEdge, setSelEdge] = useState<number | null>(null);
+  const [hovVertexId, setHovVertexId] = useState<number | null>(null);
+  const [selVertexId, setSelVertexId] = useState<number | null>(null);
 
   useEffect(() => {
     setSelFaceId(null);
     setSelEdge(null);
     setHovEdge(null);
+    setSelVertexId(null);
+    setHovVertexId(null);
   }, [selectionResetToken]);
 
   const handleFaceSelect = useCallback(
@@ -514,6 +695,7 @@ const SolidMesh: React.FC<SolidMeshProps> = ({
         captureGeometricSelection(ref, ctrlKey);
         setSelFaceId(face.groupId);
         setSelEdge(null);
+        setSelVertexId(null);
       }
     },
     [inSelectionMode, solidData.featureId, solidData.featureName, captureGeometricSelection],
@@ -546,9 +728,35 @@ const SolidMesh: React.FC<SolidMeshProps> = ({
         }, ctrlKey);
         setSelEdge(edge.id);
         setSelFaceId(null);
+        setSelVertexId(null);
       },
     }),
     [inSelectionMode, solidData.featureId, solidData.featureName, captureGeometricSelection],
+  );
+
+  const makeVertexHandlers = useCallback(
+    (v: BRepMeshVertex) => ({
+      onEnter: () => setHovVertexId(v.id),
+      onLeave: () => setHovVertexId(null),
+      onSelect: (ctrlKey: boolean) => {
+        if (!inSelectionMode || !allowSolidVertexPick) return;
+        const pos = v.position;
+        captureGeometricSelection(
+          {
+            type: 'point',
+            featureId: solidData.featureId,
+            featureName: solidData.featureName,
+            position: [pos.x, pos.y, pos.z],
+            label: `${solidData.featureName} — Vertex`,
+          },
+          ctrlKey,
+        );
+        setSelVertexId(v.id);
+        setSelFaceId(null);
+        setSelEdge(null);
+      },
+    }),
+    [inSelectionMode, allowSolidVertexPick, solidData.featureId, solidData.featureName, captureGeometricSelection],
   );
 
   return (
@@ -586,6 +794,22 @@ const SolidMesh: React.FC<SolidMeshProps> = ({
           {...makeEdgeHandlers(edge)}
         />
       ))}
+      {allowSolidVertexPick &&
+        meshVertices.map((v) => (
+          <SolidVertexHandle
+            key={`v${v.id}`}
+            position={v.position}
+            hovered={hovVertexId === v.id}
+            selected={selVertexId === v.id || preselectedVertexIds.has(v.id)}
+            inSelMode={selectionAccentHover}
+            selectable={allowSolidVertexPick}
+            preview={preview}
+            previewColor={previewColor}
+            ghost={ghost}
+            faded={faded}
+            {...makeVertexHandlers(v)}
+          />
+        ))}
     </group>
   );
 };
@@ -830,6 +1054,23 @@ const SketchWireframes = () => {
           verts.push(x1, y1, z1, x2, y2, z2);
         }
       }
+      for (const bs of sd.bsplines ?? []) {
+        if (bs.auxiliary) continue;
+        const deg = bs.degree ?? BSPLINE_DEFAULT_DEGREE;
+        const ctrl: { x: number; y: number }[] = [];
+        for (const pid of bs.controlPointIds) {
+          const p = ptMap.get(pid);
+          if (!p) break;
+          ctrl.push({ x: p.x, y: p.y });
+        }
+        if (ctrl.length !== bs.controlPointIds.length || ctrl.length < deg + 1) continue;
+        const path = sampleOpenUniformBSpline(ctrl, deg, BSPLINE_DEFAULT_SAMPLES_PER_SPAN);
+        for (let i = 0; i < path.length - 1; i++) {
+          const [x1, y1, z1] = sketch2DToWorld(skf, path[i].x, path[i].y);
+          const [x2, y2, z2] = sketch2DToWorld(skf, path[i + 1].x, path[i + 1].y);
+          verts.push(x1, y1, z1, x2, y2, z2);
+        }
+      }
 
       // Filled regions in 3D (same concept as sketch mode): detect closed loops and holes.
       // Merge coincident point ids + near-duplicate coordinates so the boundary graph closes.
@@ -876,6 +1117,20 @@ const SketchWireframes = () => {
         );
         if (path.length < 2) continue;
         edges.push({ id: `a_${a.id}`, a: sa, b: ea, path });
+      }
+      for (const bs of sd.bsplines ?? []) {
+        if (bs.auxiliary) continue;
+        const deg = bs.degree ?? BSPLINE_DEFAULT_DEGREE;
+        const cids = bs.controlPointIds.map((id) => canonical(id));
+        const ctrl = cids
+          .map((id) => loopPtMap.get(id))
+          .filter((p): p is { x: number; y: number } => !!p);
+        if (ctrl.length !== cids.length || ctrl.length < deg + 1) continue;
+        const path = sampleOpenUniformBSpline(ctrl, deg, BSPLINE_DEFAULT_SAMPLES_PER_SPAN);
+        if (path.length < 2) continue;
+        const va = cids[0]!;
+        const vb = cids[cids.length - 1]!;
+        edges.push({ id: `bs_${bs.id}`, a: va, b: vb, path });
       }
       const loops: LoopPoly[] = [];
       const adj = new Map<string, { edgeId: string; other: string }[]>();
@@ -1064,26 +1319,19 @@ const SketchWireframes = () => {
 
 const AXIS_DISPLAY_LEN = 200;
 
-function planeFromRef(ref: GeometricSelectionRef | null): { n: THREE.Vector3; d: number } | null {
-  if (!ref) return null;
-  if (ref.type === 'defaultPlane') {
-    if (ref.name === 'xy') return { n: new THREE.Vector3(0, 0, 1), d: 0 };
-    if (ref.name === 'xz') return { n: new THREE.Vector3(0, 1, 0), d: 0 };
-    return { n: new THREE.Vector3(1, 0, 0), d: 0 };
-  }
-  if (ref.type === 'face') {
-    const n = new THREE.Vector3(ref.normal[0], ref.normal[1], ref.normal[2]);
-    const len = n.length();
-    if (len < 1e-9) return null;
-    n.divideScalar(len);
-    return { n, d: ref.faceOffset };
-  }
-  return null;
+function planeThreeFromRef(
+  ref: GeometricSelectionRef | null,
+  features: Feature[],
+): { n: THREE.Vector3; d: number } | null {
+  const eq = planeEquationFromRef(ref, features);
+  if (!eq) return null;
+  return { n: new THREE.Vector3(eq.n[0], eq.n[1], eq.n[2]), d: eq.d };
 }
 
 const AxisFeatures = () => {
   const features = useCadStore((s) => s.features);
   const hiddenGeometryIds = useCadStore((s) => s.hiddenGeometryIds);
+  const captureGeometricSelection = useCadStore((s) => s.captureGeometricSelection);
 
   const axes = useMemo(() => {
     const points = new Map<string, PointFeature>(
@@ -1091,31 +1339,35 @@ const AxisFeatures = () => {
     );
     const axisFeatures = features.filter((f): f is AxisFeature => f.type === 'axis' && f.enabled !== false);
 
-    const results: { id: string; a: THREE.Vector3; b: THREE.Vector3 }[] = [];
+    const results: { id: string; name: string; a: THREE.Vector3; b: THREE.Vector3 }[] = [];
     for (const af of axisFeatures) {
       const p = af.parameters;
       let origin: THREE.Vector3 | null = null;
       let dir: THREE.Vector3 | null = null;
 
       if (p.method === 'twoPoints') {
-        const p1 = p.point1Id ? points.get(p.point1Id) : undefined;
-        const p2 = p.point2Id ? points.get(p.point2Id) : undefined;
-        if (!p1 || !p2) continue;
-        origin = new THREE.Vector3(p1.parameters.x, p1.parameters.y, p1.parameters.z);
-        dir = new THREE.Vector3(
-          p2.parameters.x - p1.parameters.x,
-          p2.parameters.y - p1.parameters.y,
-          p2.parameters.z - p1.parameters.z,
-        );
+        const o1 = worldPositionFromAxisTwoPointSlot(p, 1, features);
+        const o2 = worldPositionFromAxisTwoPointSlot(p, 2, features);
+        if (!o1 || !o2) continue;
+        origin = new THREE.Vector3(o1[0], o1[1], o1[2]);
+        dir = new THREE.Vector3(o2[0] - o1[0], o2[1] - o1[1], o2[2] - o1[2]);
       } else if (p.method === 'planePoint') {
-        const pl = planeFromRef(p.planeRef);
-        const pt = p.pointId ? points.get(p.pointId) : undefined;
-        if (!pl || !pt) continue;
-        origin = new THREE.Vector3(pt.parameters.x, pt.parameters.y, pt.parameters.z);
+        const pl = planeThreeFromRef(p.planeRef, features);
+        const pref = p.pointRef;
+        if (!pl) continue;
+        if (pref?.type === 'point' && pref.position) {
+          origin = new THREE.Vector3(pref.position[0], pref.position[1], pref.position[2]);
+        } else if (p.pointId) {
+          const pt = points.get(p.pointId);
+          if (!pt) continue;
+          origin = new THREE.Vector3(pt.parameters.x, pt.parameters.y, pt.parameters.z);
+        } else {
+          continue;
+        }
         dir = pl.n.clone();
       } else if (p.method === 'twoPlanes') {
-        const pa = planeFromRef(p.planeRefA);
-        const pb = planeFromRef(p.planeRefB);
+        const pa = planeThreeFromRef(p.planeRefA, features);
+        const pb = planeThreeFromRef(p.planeRefB, features);
         if (!pa || !pb) continue;
         const n1 = pa.n, n2 = pb.n;
         dir = n1.clone().cross(n2);
@@ -1132,16 +1384,45 @@ const AxisFeatures = () => {
       const a = origin.clone().addScaledVector(dir, -half);
       const b = origin.clone().addScaledVector(dir, half);
       if (!hiddenGeometryIds.includes(af.id)) {
-        results.push({ id: af.id, a, b });
+        results.push({ id: af.id, name: af.name, a, b });
       }
     }
     return results;
   }, [features, hiddenGeometryIds]);
 
+  const partViewportMode = usePartViewportMode();
+  const allowAxisFeaturePick =
+    partViewportMode.type === 'selection' && partViewportMode.allowed.includes('axisFeature');
+
   return (
     <>
       {axes.map((ax) => (
-        <Line key={ax.id} points={[ax.a, ax.b]} color="#fbbf24" lineWidth={2} />
+        <group key={ax.id}>
+          <Line points={[ax.a, ax.b]} color="#fbbf24" lineWidth={2} />
+          {allowAxisFeaturePick && (
+            <Line
+              points={[ax.a, ax.b]}
+              color="#000000"
+              lineWidth={12}
+              transparent
+              opacity={0}
+              depthWrite={false}
+              renderOrder={3}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                captureGeometricSelection(
+                  {
+                    type: 'axisFeature',
+                    featureId: ax.id,
+                    featureName: ax.name,
+                    label: `${ax.name} — Axis`,
+                  },
+                  false,
+                );
+              }}
+            />
+          )}
+        </group>
       ))}
     </>
   );
@@ -1165,12 +1446,16 @@ const PointFeatures = () => {
   }, [selectionResetToken]);
 
   const activeInputOptions = useCadStore((s) => s.activeInputOptions);
+  const featuresForPointSel = useCadStore((s) => s.features);
   useEffect(() => {
     if (!allowPointSelection) return;
     const pre = activeInputOptions?.preselected;
     const pt = pre?.find((r): r is Extract<GeometricSelectionRef, { type: 'point' }> => r.type === 'point');
-    if (pt) setSelectedPointId(pt.featureId);
-  }, [allowPointSelection, activeInputOptions?.preselected]);
+    if (pt) {
+      const isConstruction = featuresForPointSel.some((f) => f.type === 'point' && f.id === pt.featureId);
+      setSelectedPointId(isConstruction ? pt.featureId : null);
+    }
+  }, [allowPointSelection, activeInputOptions?.preselected, featuresForPointSel]);
 
   return (
     <>
@@ -1219,9 +1504,14 @@ const USER_PLANE_VIS_SIZE = 20;
 const PlaneFeatures = () => {
   const { features, hiddenGeometryIds, captureGeometricSelection, selectionResetToken, activeInputOptions } =
     useCadStore();
+  const transientPreviewFeature = useCadStore((s) => s.transientPreviewFeature);
   const partViewportMode = usePartViewportMode();
   const allowPlaneFeatureSelection =
     partViewportMode.type === 'selection' && partViewportMode.allowed.includes('plane');
+  const preferSolidFaceOverConstructionPlane =
+    allowPlaneFeatureSelection &&
+    partViewportMode.type === 'selection' &&
+    partViewportMode.allowed.includes('face');
   const [hoveredPlaneId, setHoveredPlaneId] = useState<string | null>(null);
   const [selectedPlaneId, setSelectedPlaneId] = useState<string | null>(null);
 
@@ -1238,56 +1528,50 @@ const PlaneFeatures = () => {
   }, [allowPlaneFeatureSelection, activeInputOptions?.preselected]);
 
   const items = useMemo(() => {
-    const pointById = new Map<string, PointFeature>(
-      features.filter((f): f is PointFeature => f.type === 'point' && f.enabled !== false).map((f) => [f.id, f]),
-    );
-    const out: { id: string; name: string; position: THREE.Vector3; quaternion: THREE.Quaternion }[] = [];
+    const out: {
+      id: string;
+      name: string;
+      position: THREE.Vector3;
+      quaternion: THREE.Quaternion;
+      isPreview?: boolean;
+    }[] = [];
+
+    const pushFromPlaneFeature = (pf: PlaneFeature, id: string, name: string, isPreview: boolean) => {
+      const eq = planeEquationFromPlaneFeature(pf, features);
+      if (!eq) return;
+      const p = pf.parameters;
+      const n = new THREE.Vector3(eq.n[0], eq.n[1], eq.n[2]).normalize();
+      let pos: THREE.Vector3;
+      if (p.method === 'offset') {
+        pos = n.clone().multiplyScalar(eq.d);
+      } else if (p.method === 'threePoints') {
+        const w1 = worldPositionFromPlanePointSlot(p, 1, features);
+        const w2 = worldPositionFromPlanePointSlot(p, 2, features);
+        const w3 = worldPositionFromPlanePointSlot(p, 3, features);
+        if (!w1 || !w2 || !w3) return;
+        const p1 = new THREE.Vector3(w1[0], w1[1], w1[2]);
+        const p2 = new THREE.Vector3(w2[0], w2[1], w2[2]);
+        const p3 = new THREE.Vector3(w3[0], w3[1], w3[2]);
+        pos = p1.clone().add(p2).add(p3).multiplyScalar(1 / 3);
+      } else {
+        return;
+      }
+      const quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+      out.push({ id, name, position: pos, quaternion: quat, isPreview });
+    };
 
     for (const f of features) {
       if (f.type !== 'plane' || f.enabled === false) continue;
       if (hiddenGeometryIds.includes(f.id)) continue;
-
-      const p = (f as PlaneFeature).parameters;
-      let pos: THREE.Vector3;
-      let quat: THREE.Quaternion;
-
-      if (p.method === 'offset') {
-        const ref = p.reference;
-        if (!ref) continue;
-        const pl = planeFromRef(ref);
-        if (!pl) continue;
-        const off = Number(p.offset) || 0;
-        const d = pl.d + off;
-        const n = pl.n.clone().normalize();
-        pos = n.clone().multiplyScalar(d);
-        quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
-      } else if (p.method === 'threePoints') {
-        const id1 = p.point1Id;
-        const id2 = p.point2Id;
-        const id3 = p.point3Id;
-        if (!id1 || !id2 || !id3) continue;
-        const t1 = pointById.get(id1);
-        const t2 = pointById.get(id2);
-        const t3 = pointById.get(id3);
-        if (!t1 || !t2 || !t3) continue;
-        const p1 = new THREE.Vector3(t1.parameters.x, t1.parameters.y, t1.parameters.z);
-        const p2 = new THREE.Vector3(t2.parameters.x, t2.parameters.y, t2.parameters.z);
-        const p3 = new THREE.Vector3(t3.parameters.x, t3.parameters.y, t3.parameters.z);
-        const e1 = p2.clone().sub(p1);
-        const e2 = p3.clone().sub(p1);
-        const n = e1.cross(e2);
-        if (n.lengthSq() < 1e-14) continue;
-        n.normalize();
-        pos = p1.clone().add(p2).add(p3).multiplyScalar(1 / 3);
-        quat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
-      } else {
-        continue;
-      }
-
-      out.push({ id: f.id, name: f.name, position: pos, quaternion: quat });
+      pushFromPlaneFeature(f as PlaneFeature, f.id, f.name, false);
     }
+
+    if (transientPreviewFeature?.type === 'plane') {
+      pushFromPlaneFeature(transientPreviewFeature as PlaneFeature, '__preview__', 'Preview', true);
+    }
+
     return out;
-  }, [features, hiddenGeometryIds]);
+  }, [features, hiddenGeometryIds, transientPreviewFeature]);
 
   return (
     <>
@@ -1295,23 +1579,34 @@ const PlaneFeatures = () => {
         const isHovered = hoveredPlaneId === it.id;
         const isSelected = selectedPlaneId === it.id;
         const highlight = allowPlaneFeatureSelection && (isHovered || isSelected);
+        const isPreview = !!it.isPreview;
         return (
           <mesh
             key={it.id}
             position={it.position}
             quaternion={it.quaternion}
             renderOrder={2}
+            raycast={isPreview ? () => null : undefined}
             onPointerOver={(e) => {
               e.stopPropagation();
-              if (allowPlaneFeatureSelection) setHoveredPlaneId(it.id);
+              if (isPreview || !allowPlaneFeatureSelection) return;
+              setHoveredPlaneId(it.id);
             }}
             onPointerOut={(e) => {
               e.stopPropagation();
-              if (allowPlaneFeatureSelection) setHoveredPlaneId((prev) => (prev === it.id ? null : prev));
+              if (isPreview || !allowPlaneFeatureSelection) return;
+              setHoveredPlaneId((prev) => (prev === it.id ? null : prev));
             }}
             onPointerDown={(e) => {
               e.stopPropagation();
-              if (!allowPlaneFeatureSelection) return;
+              if (isPreview || !allowPlaneFeatureSelection) return;
+              if (preferSolidFaceOverConstructionPlane) {
+                const faceRef = tryBrepFaceSelectionRefFromIntersections(e.intersections);
+                if (faceRef) {
+                  captureGeometricSelection(faceRef, !!(e.ctrlKey || e.shiftKey || e.metaKey));
+                  return;
+                }
+              }
               const ref: GeometricSelectionRef = {
                 type: 'plane',
                 featureId: it.id,
@@ -1324,9 +1619,9 @@ const PlaneFeatures = () => {
           >
             <planeGeometry args={[USER_PLANE_VIS_SIZE, USER_PLANE_VIS_SIZE]} />
             <meshBasicMaterial
-              color={highlight ? '#f59e0b' : '#a855f7'}
+              color={isPreview ? '#c084fc' : highlight ? '#f59e0b' : '#a855f7'}
               transparent
-              opacity={highlight ? 0.38 : 0.2}
+              opacity={isPreview ? 0.32 : highlight ? 0.38 : 0.2}
               side={THREE.DoubleSide}
               depthWrite={false}
             />
@@ -1366,9 +1661,21 @@ const DefaultPlanes = () => {
   const partViewportMode = usePartViewportMode();
   const allowDefaultPlane =
     partViewportMode.type === 'selection' && partViewportMode.allowed.includes('defaultPlane');
+  const preferSolidFaceOverOriginPlane =
+    allowDefaultPlane &&
+    partViewportMode.type === 'selection' &&
+    partViewportMode.allowed.includes('face');
   const preselectedDefaultPlaneName = activeInputOptions?.preselected?.find(
     (r): r is Extract<GeometricSelectionRef, { type: 'defaultPlane' }> => r.type === 'defaultPlane',
   )?.name;
+
+  const allowWorldAxisPick =
+    partViewportMode.type === 'selection' && partViewportMode.allowed.includes('worldAxis');
+  const worldAxisPickMeta = [
+    { axis: 'x' as const, points: AXIS_LINES[0].points, label: 'X axis (world)' },
+    { axis: 'y' as const, points: AXIS_LINES[1].points, label: 'Y axis (world)' },
+    { axis: 'z' as const, points: AXIS_LINES[2].points, label: 'Z axis (world)' },
+  ];
 
   const showPlanes = showOriginPlanes;
 
@@ -1388,6 +1695,25 @@ const DefaultPlanes = () => {
         />
       ))}
 
+      {/* Thick invisible lines along origin X/Y/Z for revolution axis (world) picking (always when picking, even if origin planes are hidden) */}
+      {allowWorldAxisPick &&
+        worldAxisPickMeta.map(({ axis, points, label }) => (
+          <Line
+            key={`world-axis-pick-${axis}`}
+            points={points}
+            color="#000000"
+            lineWidth={14}
+            transparent
+            opacity={0}
+            depthWrite={false}
+            renderOrder={4}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              captureGeometricSelection({ type: 'worldAxis', axis, label }, false);
+            }}
+          />
+        ))}
+
       {/* Plane quads */}
       {PLANE_CFG.map(({ name, color, rot }) => (
         (() => {
@@ -1401,6 +1727,13 @@ const DefaultPlanes = () => {
           onPointerDown={(e) => {
             e.stopPropagation();
             if (partViewportMode.type === 'selection' && allowDefaultPlane) {
+              if (preferSolidFaceOverOriginPlane) {
+                const faceRef = tryBrepFaceSelectionRefFromIntersections(e.intersections);
+                if (faceRef) {
+                  captureGeometricSelection(faceRef, !!(e.ctrlKey || e.shiftKey || e.metaKey));
+                  return;
+                }
+              }
               captureGeometricSelection({
                 type: 'defaultPlane',
                 name,

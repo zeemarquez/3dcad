@@ -1,5 +1,10 @@
 import { create } from 'zustand';
-import { useSketchStore } from './useSketchStore';
+import {
+  applyRadiusValueToSketchGeometry,
+  resolveSketchDataAfterDimensionValueChange,
+  type SketchDataSnapshot,
+  useSketchStore,
+} from './useSketchStore';
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Types
@@ -24,6 +29,10 @@ export type GeometricSelectionRef =
   | { type: 'face'; featureId: string; featureName: string; normal: [number, number, number]; faceOffset: number; label: string }
   | { type: 'point'; featureId: string; featureName: string; position: [number, number, number]; label: string }
   | { type: 'sketch'; featureId: string; featureName: string; label: string }
+  /** World X / Y / Z axis through the sketch origin (parallel to global axes) */
+  | { type: 'worldAxis'; axis: 'x' | 'y' | 'z'; label: string }
+  /** Construction axis feature (infinite line) */
+  | { type: 'axisFeature'; featureId: string; featureName: string; label: string }
   | {
       type: 'edge';
       featureId: string;
@@ -34,6 +43,12 @@ export type GeometricSelectionRef =
       label: string;
     };
 
+/** One of the references allowed for revolve / revolve cut axis */
+export type RevolveAxisSelection = Extract<
+  GeometricSelectionRef,
+  { type: 'worldAxis' | 'edge' | 'axisFeature' }
+>;
+
 /** Options when starting viewport geometric picking (see activateGeometricInput). */
 export interface GeometricInputOptions {
   /** Refs to show as already selected in the viewport */
@@ -43,6 +58,8 @@ export interface GeometricInputOptions {
    * Ensures edge/face IDs match stored refs (e.g. fillet/chamfer target body).
    */
   pickFromBeforeFeature?: boolean;
+  /** Show B-rep mesh vertices (e.g. axis plane+point) with hover/click like edges */
+  allowSolidVertices?: boolean;
 }
 
 export interface SketchData {
@@ -55,6 +72,13 @@ export interface SketchData {
     startId: string;
     endId: string;
     complementaryArc?: boolean;
+    auxiliary?: boolean;
+  }[];
+  /** Open uniform B-spline through control polygon (degree 3 by default). */
+  bsplines?: {
+    id: string;
+    controlPointIds: string[];
+    degree?: number;
     auxiliary?: boolean;
   }[];
   constraints: { id: string; type: string; entityIds: string[]; params?: Record<string, number>; expression?: string }[];
@@ -97,6 +121,9 @@ export interface PlaneFeature extends BaseFeature {
     point1Id?: string | null;
     point2Id?: string | null;
     point3Id?: string | null;
+    point1Ref?: Extract<GeometricSelectionRef, { type: 'point' }> | null;
+    point2Ref?: Extract<GeometricSelectionRef, { type: 'point' }> | null;
+    point3Ref?: Extract<GeometricSelectionRef, { type: 'point' }> | null;
   };
 }
 
@@ -108,6 +135,8 @@ export interface PointFeature extends BaseFeature {
     z: number;
     method?: 'coordinates' | 'offsetPoint' | 'planeAxisIntersection' | 'twoAxesIntersection';
     basePointId?: string | null;
+    /** Base is a body vertex (solid feature id + world position), not a point feature */
+    basePointRef?: Extract<GeometricSelectionRef, { type: 'point' }> | null;
     dx?: number;
     dy?: number;
     dz?: number;
@@ -138,7 +167,11 @@ export interface AxisFeature extends BaseFeature {
     method: 'twoPoints' | 'planePoint' | 'twoPlanes';
     point1Id: string | null;
     point2Id: string | null;
+    point1Ref?: Extract<GeometricSelectionRef, { type: 'point' }> | null;
+    point2Ref?: Extract<GeometricSelectionRef, { type: 'point' }> | null;
     pointId: string | null;
+    /** Full point ref when the point is a body vertex (featureId = solid); use position from ref */
+    pointRef?: Extract<GeometricSelectionRef, { type: 'point' }> | null;
     planeRef: GeometricSelectionRef | null;
     planeRefA: GeometricSelectionRef | null;
     planeRefB: GeometricSelectionRef | null;
@@ -150,9 +183,12 @@ export interface RevolveFeature extends BaseFeature {
   parameters: {
     sketchId: string;
     angle: number;
-    axis: 'x' | 'y' | 'z';
+    /** @deprecated Prefer `revolveAxis`; kept for older sketches. */
+    axis?: 'x' | 'y' | 'z';
     /** Offset along sketch plane normal (mm), same convention as extrude. */
     startOffset?: number;
+    /** World axis, edge line, or construction axis. */
+    revolveAxis?: RevolveAxisSelection | null;
   };
 }
 
@@ -161,8 +197,9 @@ export interface RevolveCutFeature extends BaseFeature {
   parameters: {
     sketchId: string;
     angle: number;
-    axis: 'x' | 'y' | 'z';
+    axis?: 'x' | 'y' | 'z';
     startOffset?: number;
+    revolveAxis?: RevolveAxisSelection | null;
   };
 }
 
@@ -546,13 +583,17 @@ function isSolidFeatureType(type: FeatureType): boolean {
 }
 
 function getFeatureDependencyIds(feature: Feature): string[] {
-  if (
-    feature.type === 'extrude' ||
-    feature.type === 'cut' ||
-    feature.type === 'revolve' ||
-    feature.type === 'revolveCut'
-  ) {
+  if (feature.type === 'extrude' || feature.type === 'cut') {
     return feature.parameters.sketchId ? [feature.parameters.sketchId] : [];
+  }
+  if (feature.type === 'revolve' || feature.type === 'revolveCut') {
+    const deps: string[] = [];
+    const p = feature.parameters;
+    if (p.sketchId) deps.push(p.sketchId);
+    const ra = p.revolveAxis;
+    if (ra?.type === 'edge' && ra.featureId) deps.push(ra.featureId);
+    if (ra?.type === 'axisFeature' && ra.featureId) deps.push(ra.featureId);
+    return deps;
   }
   if (feature.type === 'fillet' || feature.type === 'chamfer') {
     const deps = new Set<string>();
@@ -563,22 +604,38 @@ function getFeatureDependencyIds(feature: Feature): string[] {
     return [...deps];
   }
   if (feature.type === 'plane' && feature.parameters.method === 'threePoints') {
-    return [feature.parameters.point1Id, feature.parameters.point2Id, feature.parameters.point3Id].filter(Boolean) as string[];
+    const p = feature.parameters;
+    const deps: string[] = [];
+    for (const slot of [1, 2, 3] as const) {
+      const id = slot === 1 ? p.point1Id : slot === 2 ? p.point2Id : p.point3Id;
+      const ref = slot === 1 ? p.point1Ref : slot === 2 ? p.point2Ref : p.point3Ref;
+      if (id) deps.push(id);
+      else if (ref?.type === 'point' && ref.featureId) deps.push(ref.featureId);
+    }
+    return deps;
   }
   if (feature.type === 'axis') {
     const deps: string[] = [];
     if (feature.parameters.method === 'twoPoints') {
-      if (feature.parameters.point1Id) deps.push(feature.parameters.point1Id);
-      if (feature.parameters.point2Id) deps.push(feature.parameters.point2Id);
+      const ap = feature.parameters;
+      if (ap.point1Id) deps.push(ap.point1Id);
+      else if (ap.point1Ref?.type === 'point' && ap.point1Ref.featureId) deps.push(ap.point1Ref.featureId);
+      if (ap.point2Id) deps.push(ap.point2Id);
+      else if (ap.point2Ref?.type === 'point' && ap.point2Ref.featureId) deps.push(ap.point2Ref.featureId);
     } else if (feature.parameters.method === 'planePoint') {
+      const pr = feature.parameters.pointRef;
       if (feature.parameters.pointId) deps.push(feature.parameters.pointId);
+      else if (pr?.type === 'point' && pr.featureId) deps.push(pr.featureId);
     }
     return deps;
   }
   if (feature.type === 'point') {
     const deps: string[] = [];
     const p = feature.parameters;
-    if (p.method === 'offsetPoint' && p.basePointId) deps.push(p.basePointId);
+    if (p.method === 'offsetPoint') {
+      if (p.basePointId) deps.push(p.basePointId);
+      else if (p.basePointRef?.type === 'point' && p.basePointRef.featureId) deps.push(p.basePointRef.featureId);
+    }
     if (p.method === 'planeAxisIntersection' && p.axisFeatureId) deps.push(p.axisFeatureId);
     if (p.method === 'twoAxesIntersection') {
       if (p.axisFeatureIdA) deps.push(p.axisFeatureIdA);
@@ -669,21 +726,37 @@ function applyValueToDimensionTarget(features: Feature[], dim: DimensionParamete
         parameters: { ...f.parameters, [target.param]: value },
       } as Feature;
     }
+    if (target.kind !== 'sketchConstraint') return f;
     if (f.type !== 'sketch') return f;
     const sketchData = f.parameters.sketchData;
     if (!sketchData) return f;
+    const updatedConstraints = sketchData.constraints.map((c) =>
+      c.id === target.constraintId
+        ? { ...c, params: { ...(c.params ?? {}), [target.paramKey]: value } }
+        : c
+    );
+    let nextSketchData: SketchData = { ...sketchData, constraints: updatedConstraints };
+    if (target.paramKey === 'radius') {
+      const cn = sketchData.constraints.find((c) => c.id === target.constraintId);
+      const entityId = cn?.entityIds?.[0];
+      if (entityId) {
+        const g = applyRadiusValueToSketchGeometry(
+          sketchData.points,
+          sketchData.circles,
+          sketchData.arcs,
+          updatedConstraints,
+          entityId,
+          value
+        );
+        nextSketchData = { ...nextSketchData, points: g.points, circles: g.circles };
+      }
+    }
+    nextSketchData = resolveSketchDataAfterDimensionValueChange(nextSketchData as SketchDataSnapshot) as SketchData;
     return {
       ...f,
       parameters: {
         ...f.parameters,
-        sketchData: {
-          ...sketchData,
-          constraints: sketchData.constraints.map((c) =>
-            c.id === target.constraintId
-              ? { ...c, params: { ...(c.params ?? {}), [target.paramKey]: value } }
-              : c
-          ),
-        },
+        sketchData: nextSketchData,
       },
     };
   });
@@ -855,7 +928,8 @@ export const useCadStore = create<CadState>((set, get) => {
             (sd.points?.length ?? 0) > 0 ||
             (sd.lines?.length ?? 0) > 0 ||
             (sd.circles?.length ?? 0) > 0 ||
-            (sd.arcs?.length ?? 0) > 0
+            (sd.arcs?.length ?? 0) > 0 ||
+            (sd.bsplines?.length ?? 0) > 0
           );
         });
         preselection = latestPopulated?.id ?? sketches[sketches.length - 1]?.id ?? null;

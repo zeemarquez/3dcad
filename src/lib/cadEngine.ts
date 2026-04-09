@@ -1,9 +1,16 @@
 import opencascade from "replicad-opencascadejs/src/replicad_single.js";
 import opencascadeWasm from "replicad-opencascadejs/src/replicad_single.wasm?url";
-import { setOC, draw, drawCircle, drawRectangle, drawProjection, Plane, revolution, type Shape3D } from "replicad";
+import { setOC, draw, drawRectangle, drawProjection, drawSingleCircle, Plane, revolution, type Shape3D } from "replicad";
 import type { GeometricSelectionRef, SketchFeature } from "../store/useCadStore";
 import { cross3, normalize3, getSketchPlaneBasis, worldToSketch2D } from "./sketchPlaneBasis";
 import { sampleArcPoints } from "./sketchArcPoints";
+import {
+  BSPLINE_DEFAULT_DEGREE,
+  BSPLINE_DEFAULT_SAMPLES_PER_SPAN,
+  BSPLINE_HIT_SAMPLES_PER_SPAN,
+  sampleOpenUniformBSpline,
+  uniformBsplineToCubicBezierSegments,
+} from "./sketchBspline";
 import { mergeCoincidentSketchVertices, pickNextEdgeInFace } from "./sketchLoopDetection";
 import type { ShapeMesh } from "replicad";
 
@@ -60,20 +67,30 @@ interface SketchArc {
   auxiliary?: boolean;
 }
 
+interface SketchBspline {
+  id: string;
+  controlPointIds: string[];
+  degree?: number;
+  auxiliary?: boolean;
+}
+
 interface SketchData {
   points: SketchPoint[];
   lines: SketchLine[];
   circles?: SketchCircle[];
   arcs?: SketchArc[];
+  bsplines?: SketchBspline[];
   constraints?: { type: string; entityIds: string[] }[];
 }
 interface LoopEdge {
   id: string;
   a: string;
   b: string;
-  kind: "line" | "arc";
+  kind: "line" | "arc" | "bspline";
   via?: { x: number; y: number }; // for arc: an interior point on the arc
-  path: { x: number; y: number }[]; // includes both endpoints
+  path: { x: number; y: number }[]; // includes both endpoints; for bspline: coarse sample for loop tangents
+  bsplineControlPoints?: { x: number; y: number }[];
+  bsplineDegree?: number;
 }
 
 interface SketchRegionLoop {
@@ -112,7 +129,16 @@ function findClosedMixedLoops(
   merged: ReturnType<typeof mergeCoincidentSketchVertices>
 ): {
   start: { x: number; y: number };
-  segments: { kind: "line" | "arc"; end: { x: number; y: number }; via?: { x: number; y: number }; polyPath: { x: number; y: number }[] }[];
+  segments: {
+    kind: "line" | "arc" | "bspline";
+    end: { x: number; y: number };
+    via?: { x: number; y: number };
+    polyPath: { x: number; y: number }[];
+    bsplineControlPoints?: { x: number; y: number }[];
+    bsplineDegree?: number;
+    /** True when the loop walks this edge from last pole → first (reverse parameter). */
+    bsplineDrawReversed?: boolean;
+  }[];
 }[] {
   const { canonical, mergedPtMap: ptMap } = merged;
   const edges: LoopEdge[] = [];
@@ -157,6 +183,29 @@ function findClosedMixedLoops(
     edges.push({ id: `arc_${a.id}`, a: sa, b: ea, kind: "arc", via, path });
   }
 
+  for (const bs of sd.bsplines ?? []) {
+    if (bs.auxiliary) continue;
+    const deg = bs.degree ?? BSPLINE_DEFAULT_DEGREE;
+    const cids = bs.controlPointIds.map((id) => canonical(id));
+    const ctrlPts = cids
+      .map((id) => ptMap.get(id))
+      .filter((p): p is { x: number; y: number } => !!p);
+    if (ctrlPts.length !== cids.length || ctrlPts.length < deg + 1) continue;
+    const path = sampleOpenUniformBSpline(ctrlPts, deg, BSPLINE_HIT_SAMPLES_PER_SPAN);
+    if (path.length < 2) continue;
+    const va = cids[0]!;
+    const vb = cids[cids.length - 1]!;
+    edges.push({
+      id: `bspline_${bs.id}`,
+      a: va,
+      b: vb,
+      kind: "bspline",
+      path,
+      bsplineControlPoints: ctrlPts.map((p) => ({ x: p.x, y: p.y })),
+      bsplineDegree: deg,
+    });
+  }
+
   const adj = new Map<string, { edgeId: string; other: string }[]>();
   for (const e of edges) {
     if (!adj.has(e.a)) adj.set(e.a, []);
@@ -167,7 +216,18 @@ function findClosedMixedLoops(
 
   const byId = new Map(edges.map((e) => [e.id, e]));
   const used = new Set<string>();
-  const loops: { start: { x: number; y: number }; segments: { kind: "line" | "arc"; end: { x: number; y: number }; via?: { x: number; y: number }; polyPath: { x: number; y: number }[] }[] }[] = [];
+  const loops: {
+    start: { x: number; y: number };
+    segments: {
+      kind: "line" | "arc" | "bspline";
+      end: { x: number; y: number };
+      via?: { x: number; y: number };
+      polyPath: { x: number; y: number }[];
+      bsplineControlPoints?: { x: number; y: number }[];
+      bsplineDegree?: number;
+      bsplineDrawReversed?: boolean;
+    }[];
+  }[] = [];
 
   for (const seed of edges) {
     if (used.has(seed.id)) continue;
@@ -192,16 +252,34 @@ function findClosedMixedLoops(
       curNode = next.other;
     }
 
-    if (curNode === startNode && ordered.length >= 2) {
+    const singleClosedBspline =
+      ordered.length === 1 &&
+      ordered[0].seg.kind === "bspline" &&
+      ordered[0].seg.a === ordered[0].seg.b;
+    if (curNode === startNode && (ordered.length >= 2 || singleClosedBspline)) {
       for (const id of thisUsed) used.add(id);
       const firstSeg = ordered[0];
       const start = firstSeg.forward ? firstSeg.seg.path[0] : firstSeg.seg.path[firstSeg.seg.path.length - 1];
-      const segments = ordered.map(({ seg, forward }) => ({
-        kind: seg.kind,
-        end: forward ? seg.path[seg.path.length - 1] : seg.path[0],
-        via: seg.via,
-        polyPath: forward ? seg.path : [...seg.path].reverse(),
-      }));
+      const segments = ordered.map(({ seg, forward }) => {
+        if (seg.kind === "bspline") {
+          const path = forward ? seg.path : [...seg.path].reverse();
+          return {
+            kind: "bspline" as const,
+            end: forward ? path[path.length - 1]! : path[0]!,
+            via: undefined,
+            polyPath: path,
+            bsplineControlPoints: seg.bsplineControlPoints,
+            bsplineDegree: seg.bsplineDegree,
+            bsplineDrawReversed: !forward,
+          };
+        }
+        return {
+          kind: seg.kind,
+          end: forward ? seg.path[seg.path.length - 1]! : seg.path[0]!,
+          via: seg.via,
+          polyPath: forward ? seg.path : [...seg.path].reverse(),
+        };
+      });
       loops.push({ start, segments });
     }
   }
@@ -219,7 +297,17 @@ function buildSketchRegionLoops(sd: SketchData): SketchRegionLoop[] {
     if (!loop.segments.length) continue;
     const poly: { x: number; y: number }[] = [loop.start];
     for (const seg of loop.segments) {
-      poly.push(...seg.polyPath.slice(1));
+      if (seg.kind === "bspline" && seg.bsplineControlPoints?.length) {
+        let dense = sampleOpenUniformBSpline(
+          seg.bsplineControlPoints,
+          seg.bsplineDegree ?? BSPLINE_DEFAULT_DEGREE,
+          BSPLINE_DEFAULT_SAMPLES_PER_SPAN
+        );
+        if (seg.bsplineDrawReversed && dense.length >= 2) dense = [...dense].reverse();
+        if (dense.length >= 2) poly.push(...dense.slice(1));
+      } else {
+        poly.push(...seg.polyPath.slice(1));
+      }
     }
     if (poly.length < 3) continue;
     const areaAbs = Math.abs(signedArea(poly));
@@ -242,8 +330,35 @@ function buildSketchRegionLoops(sd: SketchData): SketchRegionLoop[] {
       makeDrawing: () => {
         let d = draw([loop.start.x, loop.start.y]);
         for (const seg of loop.segments) {
-          if (seg.kind === "arc" && seg.via) d = d.threePointsArcTo([seg.end.x, seg.end.y], [seg.via.x, seg.via.y]);
-          else d = d.lineTo([seg.end.x, seg.end.y]);
+          if (seg.kind === "arc" && seg.via) {
+            d = d.threePointsArcTo([seg.end.x, seg.end.y], [seg.via.x, seg.via.y]);
+          } else if (seg.kind === "bspline" && seg.bsplineControlPoints?.length) {
+            const deg = seg.bsplineDegree ?? BSPLINE_DEFAULT_DEGREE;
+            let bez = uniformBsplineToCubicBezierSegments(seg.bsplineControlPoints, deg);
+            if (seg.bsplineDrawReversed && bez.length > 0) {
+              bez = bez.reverse().map((b) => ({
+                b0: b.b3,
+                b1: b.b2,
+                b2: b.b1,
+                b3: b.b0,
+              }));
+            }
+            if (bez.length > 0) {
+              for (const b of bez) {
+                d = d.cubicBezierCurveTo([b.b3.x, b.b3.y], [b.b1.x, b.b1.y], [b.b2.x, b.b2.y]);
+              }
+            } else {
+              for (let pi = 1; pi < seg.polyPath.length; pi++) {
+                d = d.lineTo([seg.polyPath[pi].x, seg.polyPath[pi].y]);
+              }
+            }
+          } else if (seg.polyPath.length > 2) {
+            for (let pi = 1; pi < seg.polyPath.length; pi++) {
+              d = d.lineTo([seg.polyPath[pi].x, seg.polyPath[pi].y]);
+            }
+          } else {
+            d = d.lineTo([seg.end.x, seg.end.y]);
+          }
         }
         return d.close();
       },
@@ -267,7 +382,7 @@ function buildSketchRegionLoops(sd: SketchData): SketchRegionLoop[] {
       centroid: { x: center.x, y: center.y },
       bbox: { minX: center.x - c.radius, minY: center.y - c.radius, maxX: center.x + c.radius, maxY: center.y + c.radius },
       polygon: poly,
-      makeDrawing: () => drawCircle(c.radius).translate(center.x, center.y),
+      makeDrawing: () => drawSingleCircle(c.radius).translate(center.x, center.y),
     });
   }
 
@@ -452,6 +567,42 @@ function worldRevolveAxisDirection(axis: "x" | "y" | "z"): [number, number, numb
   return [0, 0, 1];
 }
 
+function normalizeVec3(v: [number, number, number]): [number, number, number] {
+  const l = Math.hypot(v[0], v[1], v[2]);
+  if (l < 1e-12) return [0, 0, 1];
+  return [v[0] / l, v[1] / l, v[2] / l];
+}
+
+/** Closest point on infinite line (linePoint + t * dir, |dir|=1) to `point`. */
+function closestPointOnUnitAxisLine(
+  point: [number, number, number],
+  linePoint: [number, number, number],
+  dirUnit: [number, number, number],
+): [number, number, number] {
+  const ox = point[0] - linePoint[0];
+  const oy = point[1] - linePoint[1];
+  const oz = point[2] - linePoint[2];
+  const t = ox * dirUnit[0] + oy * dirUnit[1] + oz * dirUnit[2];
+  return [
+    linePoint[0] + t * dirUnit[0],
+    linePoint[1] + t * dirUnit[1],
+    linePoint[2] + t * dirUnit[2],
+  ];
+}
+
+function revolveKernelPointToTuple(p: unknown): [number, number, number] {
+  if (p == null) return [0, 0, 0];
+  if (Array.isArray(p) && p.length >= 3) {
+    return [Number(p[0]), Number(p[1]), Number(p[2])];
+  }
+  const any = p as { toTuple?: () => number[]; x?: number; y?: number; z?: number };
+  if (typeof any.toTuple === "function") {
+    const t = any.toTuple();
+    return [Number(t[0]), Number(t[1]), Number(t[2])];
+  }
+  return [Number(any.x ?? 0), Number(any.y ?? 0), Number(any.z ?? 0)];
+}
+
 function sketchToSolids(op: SketchBooleanFeatureInput): Shape3D[] {
   const sd = op.sketchData;
   if (!sd?.points?.length) return [];
@@ -484,7 +635,7 @@ function sketchToRevolveSolids(op: RevolveFeatureInput): Shape3D[] {
   });
   const rawAngle = Math.abs(Number(op.angle) || 360);
   const angleDeg = Math.min(Math.max(rawAngle, 0.001), 360);
-  const axisDir = worldRevolveAxisDirection(op.axis);
+  const mode = op.revolveAxisMode ?? "world";
 
   const results: Shape3D[] = [];
   const regionDrawings = buildFilledRegionDrawings(sd);
@@ -494,7 +645,19 @@ function sketchToRevolveSolids(op: RevolveFeatureInput): Shape3D[] {
     try {
       sk = drawing.sketchOnPlane(rpPlane);
       fc = sk.face();
-      const solid = revolution(fc, sk.defaultOrigin, axisDir, angleDeg) as Shape3D;
+      const sketchOrigin = revolveKernelPointToTuple(sk.defaultOrigin);
+      let axisDir: [number, number, number];
+      let axisCenter: unknown = sk.defaultOrigin;
+      if (mode === "edge" && op.edgeAxis) {
+        axisDir = normalizeVec3(op.edgeAxis.direction);
+        axisCenter = closestPointOnUnitAxisLine(sketchOrigin, op.edgeAxis.midpoint, axisDir);
+      } else if (mode === "axisFeature" && op.axisFeatureLine) {
+        axisDir = normalizeVec3(op.axisFeatureLine.d);
+        axisCenter = closestPointOnUnitAxisLine(sketchOrigin, op.axisFeatureLine.p, axisDir);
+      } else {
+        axisDir = worldRevolveAxisDirection(op.axis);
+      }
+      const solid = revolution(fc, axisCenter, axisDir, angleDeg) as Shape3D;
       results.push(solid);
     } catch (e) {
       console.warn("Failed to build revolve solid:", e);
@@ -608,6 +771,12 @@ export interface RevolveFeatureInput {
   planeRef?: Extract<GeometricSelectionRef, { type: "defaultPlane" | "face" | "plane" }> | null;
   angle: number;
   axis: "x" | "y" | "z";
+  /** Default `world` — parallel to global X/Y/Z through sketch origin. */
+  revolveAxisMode?: "world" | "edge" | "axisFeature";
+  /** Straight edge axis (direction + point on edge); used when mode is `edge`. */
+  edgeAxis?: { direction: [number, number, number]; midpoint: [number, number, number] };
+  /** Resolved construction axis line; used when mode is `axisFeature`. */
+  axisFeatureLine?: { p: [number, number, number]; d: [number, number, number] };
 }
 
 export interface EdgeBlendFeatureInput {

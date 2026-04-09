@@ -13,8 +13,17 @@ import {
   type ChamferFeature,
   type Feature,
   type GeometricSelectionRef,
+  type RevolveAxisSelection,
 } from '../store/useCadStore';
 import { X, MousePointer, ChevronsLeftRight, ArrowRightLeft } from 'lucide-react';
+import { PointRefInput } from './PointRefInput';
+import { isPlaneRef, isPointRef, isEdgeRef, isRevolveAxisRef } from '../lib/geoSelectionRef';
+import {
+  worldPositionFromPlanePointSlot,
+  worldPositionFromAxisTwoPointSlot,
+  planeThreePointPositionsArePairwiseDistinct,
+  planeEquationFromPlaneFeature,
+} from '../lib/sketchPlaneBasis';
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Shared input classes
@@ -189,6 +198,8 @@ const SelectionInput: React.FC<SelectionInputProps> = ({
   const isActive = activeInputField === fieldKey;
   const objectLabel = fieldKey.startsWith('sketch_')
     ? 'sketch'
+    : fieldKey === 'revolveAxis'
+    ? 'axis'
     : fieldKey.endsWith('Edges')
     ? 'edge'
     : fieldKey.toLowerCase().includes('point')
@@ -331,14 +342,37 @@ function planeToRef(plane: 'xy' | 'xz' | 'yz'): GeometricSelectionRef {
   return { type: 'defaultPlane', name: plane, label: labels[plane] };
 }
 
-function isPlaneRef(ref: GeometricSelectionRef | null): ref is Extract<GeometricSelectionRef, { type: 'defaultPlane' | 'face' | 'plane' }> {
-  return !!ref && (ref.type === 'defaultPlane' || ref.type === 'face' || ref.type === 'plane');
+function edgeRefsEqual(
+  a: Extract<GeometricSelectionRef, { type: 'edge' }>,
+  b: Extract<GeometricSelectionRef, { type: 'edge' }>,
+) {
+  return (
+    a.featureId === b.featureId &&
+    Math.abs(a.midpoint[0] - b.midpoint[0]) < 1e-6 &&
+    Math.abs(a.midpoint[1] - b.midpoint[1]) < 1e-6 &&
+    Math.abs(a.midpoint[2] - b.midpoint[2]) < 1e-6
+  );
 }
-function isPointRef(ref: GeometricSelectionRef | null): ref is Extract<GeometricSelectionRef, { type: 'point' }> {
-  return !!ref && ref.type === 'point';
+
+function formatRevolveAxisDisplay(
+  ra: RevolveAxisSelection | null | undefined,
+  legacyAxis?: string,
+): string {
+  if (ra?.type === 'worldAxis') return ra.label || `${ra.axis.toUpperCase()} axis (world)`;
+  if (ra?.type === 'edge') return ra.label || 'Straight edge';
+  if (ra?.type === 'axisFeature') return ra.label || 'Axis feature';
+  const a = legacyAxis === 'x' || legacyAxis === 'y' || legacyAxis === 'z' ? legacyAxis : 'z';
+  return `${a.toUpperCase()} axis (world)`;
 }
-function isEdgeRef(ref: GeometricSelectionRef | null): ref is Extract<GeometricSelectionRef, { type: 'edge' }> {
-  return !!ref && ref.type === 'edge';
+
+function resolveRevolveAxisForEdit(
+  feat: RevolveFeature | RevolveCutFeature,
+): RevolveAxisSelection {
+  const ra = feat.parameters.revolveAxis;
+  if (ra && isRevolveAxisRef(ra)) return ra;
+  const a = feat.parameters.axis;
+  const ax = a === 'x' || a === 'y' || a === 'z' ? a : 'z';
+  return { type: 'worldAxis', axis: ax, label: `${ax.toUpperCase()} axis (world)` };
 }
 
 function planeFromRef(ref: GeometricSelectionRef | null): { n: [number, number, number]; d: number } | null {
@@ -381,47 +415,6 @@ function add(a: [number, number, number], b: [number, number, number]): [number,
 function scale(a: [number, number, number], s: number): [number, number, number] {
   return [a[0] * s, a[1] * s, a[2] * s];
 }
-
-interface PointRefInputProps {
-  label: string;
-  value: string | null | undefined;
-  points: PointFeature[];
-  fieldKey: string;
-  onChange: (pointId: string) => void;
-}
-const PointRefInput: React.FC<PointRefInputProps> = ({ label, value, points, fieldKey, onChange }) => {
-  const found = points.find((p) => p.id === value);
-  return (
-    <SelectionInput
-      label={label}
-      displayText={found ? found.name : 'Click to select point…'}
-      fieldKey={fieldKey}
-      hasValue={!!found}
-      onActivate={() => {
-        const pre =
-          found != null
-            ? ([
-                {
-                  type: 'point' as const,
-                  featureId: found.id,
-                  featureName: found.name,
-                  position: [found.parameters.x, found.parameters.y, found.parameters.z] as [number, number, number],
-                  label: `${found.name} — Point`,
-                },
-              ] satisfies GeometricSelectionRef[])
-            : undefined;
-        useCadStore.getState().activateGeometricInput(
-          fieldKey,
-          (sel) => {
-            if (!isPointRef(sel)) return;
-            onChange(sel.featureId);
-          },
-          { preselected: pre },
-        );
-      }}
-    />
-  );
-};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Main PropertyManager
@@ -476,7 +469,8 @@ export const PropertyManager = () => {
       (sd.points?.length ?? 0) > 0 ||
       (sd.lines?.length ?? 0) > 0 ||
       (sd.circles?.length ?? 0) > 0 ||
-      (sd.arcs?.length ?? 0) > 0
+      (sd.arcs?.length ?? 0) > 0 ||
+      (sd.bsplines?.length ?? 0) > 0
     );
   };
   const latestPopulatedSketch = [...sketches].reverse().find((s) => hasSketchGeometry(s));
@@ -492,6 +486,7 @@ export const PropertyManager = () => {
   // New-feature form state
   const [np, setNp] = useState<Record<string, any>>({});
   const updateNp = useCallback((patch: Record<string, any>) => setNp((p) => ({ ...p, ...patch })), []);
+  const sketchPlanePickCommitLockRef = useRef(false);
   const lastPreviewSigRef = useRef<string | null>(null);
   const [exprError, setExprError] = useState('');
   const [editFields, setEditFields] = useState<Record<string, string>>({});
@@ -539,6 +534,82 @@ export const PropertyManager = () => {
     return res.value;
   }, [expressionEnv, getFeatureTargetParamName]);
 
+  /** New sketch only: create sketch feature and open sketcher when a plane is picked (no OK). Editing uses `sketchPlaneEdit` — not this path. */
+  const commitNewSketchAfterPlanePick = useCallback((planeRef: GeometricSelectionRef) => {
+    const state = useCadStore.getState();
+    if (state.activeCommand !== 'sketch' || state.selectedFeatureId != null) return;
+    if (sketchPlanePickCommitLockRef.current) return;
+    sketchPlanePickCommitLockRef.current = true;
+    try {
+      const { plane, offset } = geoRefToPlaneAndOffset(planeRef);
+      const planeRefStored = isPlaneRef(planeRef) ? planeRef : planeToRef(plane);
+      const planeOffset = planeRefStored.type === 'face' || planeRefStored.type === 'plane' ? 0 : offset;
+      const id = `f${Date.now()}`;
+      const name = `${formatCommandLabel('sketch')} ${state.features.length + 1}`;
+      const feature: Feature = {
+        id,
+        name,
+        type: 'sketch',
+        parameters: { plane, planeOffset, planeRef: planeRefStored },
+      };
+      state.addFeature(feature);
+      state.deactivateGeometricInput();
+      state.setTransientPreviewFeature(null);
+      state.enterSketchMode(feature.id);
+    } finally {
+      sketchPlanePickCommitLockRef.current = false;
+    }
+  }, []);
+
+  const onNewSketchPlaneChosenRef = useRef<(ref: GeometricSelectionRef) => void>(() => {});
+  onNewSketchPlaneChosenRef.current = (ref: GeometricSelectionRef) => {
+    updateNp({ planeRef: ref });
+    commitNewSketchAfterPlanePick(ref);
+  };
+
+  const startViewportEdgePickingForNewFilletChamfer = useCallback(
+    (kind: 'fillet' | 'chamfer', preselected?: Extract<GeometricSelectionRef, { type: 'edge' }>[]) => {
+      const edgeFieldKey = kind === 'fillet' ? 'filletEdges' : 'chamferEdges';
+      setExprError('');
+      activateGeometricInput(
+        edgeFieldKey,
+        (sel) => {
+          if (!isEdgeRef(sel)) return;
+          setNp((p) => {
+            const selectedEdges = (p.edges ?? []) as Extract<GeometricSelectionRef, { type: 'edge' }>[];
+            const currentTarget = String(
+              p.targetFeatureId ??
+                selectedEdges[0]?.featureId ??
+                commandPreselection ??
+                solidTargetFeatures[solidTargetFeatures.length - 1]?.id ??
+                ''
+            );
+            const baseTarget = selectedEdges[0]?.featureId ?? currentTarget;
+            if (baseTarget && sel.featureId !== baseTarget) {
+              setExprError('All selected edges must belong to the same target feature');
+              return p;
+            }
+            if (selectedEdges.some((e) => edgeRefsEqual(e, sel))) return p;
+            const nextEdges = [...selectedEdges, sel];
+            const targetFeatureId = nextEdges[0]?.featureId ?? '';
+            useCadStore.setState((s) => {
+              if (s.activeInputField !== edgeFieldKey || !s.activeInputOptions) return {};
+              return {
+                activeInputOptions: { ...s.activeInputOptions, preselected: nextEdges },
+              };
+            });
+            return { ...p, edges: nextEdges, targetFeatureId };
+          });
+        },
+        {
+          preselected: preselected ?? [],
+          pickFromBeforeFeature: false,
+        },
+      );
+    },
+    [activateGeometricInput, commandPreselection, solidTargetFeatures],
+  );
+
   // Watch for sketch selection while sketchInput is active
   useEffect(() => {
     if (activeInputField && activeInputField.startsWith('sketch_') && selFeatId) {
@@ -567,19 +638,29 @@ export const PropertyManager = () => {
       defaults.point1Id = points[0]?.id ?? null;
       defaults.point2Id = points[1]?.id ?? points[0]?.id ?? null;
       defaults.point3Id = points[2]?.id ?? points[0]?.id ?? null;
+      defaults.point1Ref = null;
+      defaults.point2Ref = null;
+      defaults.point3Ref = null;
     } else if (activeCommand === 'axis') {
       defaults.method = 'twoPoints';
       defaults.point1Id = points[0]?.id ?? null;
       defaults.point2Id = points[1]?.id ?? points[0]?.id ?? null;
+      defaults.point1Ref = null;
+      defaults.point2Ref = null;
       defaults.pointId = points[0]?.id ?? null;
+      defaults.pointRef = null;
       defaults.planeRef = null;
       defaults.planeRefA = null;
       defaults.planeRefB = null;
     } else if (activeCommand === 'revolve' || activeCommand === 'revolveCut') {
       defaults.sketchId = resolveSketchId(preferredSketchId);
       defaults.angle = 360;
-      defaults.axis = 'z';
       defaults.startOffset = 0;
+      defaults.revolveAxis = {
+        type: 'worldAxis',
+        axis: 'z',
+        label: 'Z axis (world)',
+      } satisfies RevolveAxisSelection;
     } else if (activeCommand === 'fillet') {
       defaults.targetFeatureId = commandPreselection ?? solidTargetFeatures[solidTargetFeatures.length - 1]?.id ?? '';
       defaults.radius = 1;
@@ -594,16 +675,52 @@ export const PropertyManager = () => {
 
       if (!preRef) {
         activateGeometricInput('sketchPlane', (ref: GeometricSelectionRef) => {
-          updateNp({ planeRef: ref });
+          onNewSketchPlaneChosenRef.current(ref);
         });
       }
+    } else if (activeCommand === 'point') {
+      defaults.pointMethod = 'coordinates';
+      defaults.x = 0;
+      defaults.y = 0;
+      defaults.z = 0;
+      defaults.basePointId = null;
+      defaults.basePointRef = null;
+      defaults.dx = 0;
+      defaults.dy = 0;
+      defaults.dz = 0;
     }
     setNp(defaults);
+
+    if (activeCommand === 'fillet') {
+      startViewportEdgePickingForNewFilletChamfer('fillet');
+    } else if (activeCommand === 'chamfer') {
+      startViewportEdgePickingForNewFilletChamfer('chamfer');
+    } else if (activeCommand === 'plane' && (defaults.method ?? 'offset') === 'offset' && !defaults.reference) {
+      activateGeometricInput('planeRef', (ref: GeometricSelectionRef) => {
+        updateNp({ reference: ref });
+      });
+    } else if (
+      (activeCommand === 'extrude' ||
+        activeCommand === 'cut' ||
+        activeCommand === 'revolve' ||
+        activeCommand === 'revolveCut') &&
+      !defaults.sketchId
+    ) {
+      activateGeometricInput(
+        'sketch_sketchId',
+        (sel) => {
+          if (sel.type !== 'sketch') return;
+          updateNp({ sketchId: sel.featureId });
+        },
+        undefined,
+      );
+    }
 
     return () => {
       deactivateGeometricInput();
       setTransientPreviewFeature(null);
     };
+    // Command entry only — do not depend on solidTargetFeatures/commandPreselection or re-init wipes the form.
   }, [activeCommand]);
 
   useEffect(() => {
@@ -657,6 +774,15 @@ export const PropertyManager = () => {
       return;
     }
     if (activeCommand === 'revolve' || activeCommand === 'revolveCut') {
+      const ra = np.revolveAxis as RevolveAxisSelection | undefined;
+      const resolvedAxis =
+        ra && isRevolveAxisRef(ra)
+          ? ra
+          : ({ type: 'worldAxis', axis: 'z', label: 'Z axis (world)' } satisfies RevolveAxisSelection);
+      const legacy =
+        resolvedAxis.type === 'worldAxis'
+          ? resolvedAxis.axis
+          : 'z';
       const preview: Feature = {
         id,
         name,
@@ -664,7 +790,8 @@ export const PropertyManager = () => {
         parameters: {
           sketchId: resolveSketchId(np.sketchId),
           angle: num(np.angle, 360),
-          axis: (np.axis === 'x' || np.axis === 'y' || np.axis === 'z') ? np.axis : 'z',
+          axis: legacy,
+          revolveAxis: resolvedAxis,
           startOffset: num(np.startOffset, 0),
         },
       };
@@ -720,14 +847,92 @@ export const PropertyManager = () => {
       setTransientPreviewFeature(preview);
       return;
     }
+    if (activeCommand === 'plane') {
+      const method = np.method || 'offset';
+      const offset = num(np.offset, 0);
+      if (method === 'offset') {
+        const reference = np.reference ?? null;
+        if (!reference) {
+          lastPreviewSigRef.current = null;
+          setTransientPreviewFeature(null);
+          return;
+        }
+        const preview: Feature = {
+          id,
+          name,
+          type: 'plane',
+          parameters: {
+            method: 'offset',
+            reference,
+            offset,
+            point1Id: null,
+            point2Id: null,
+            point3Id: null,
+          },
+        };
+        const sig = JSON.stringify(preview);
+        if (lastPreviewSigRef.current === sig) return;
+        lastPreviewSigRef.current = sig;
+        setTransientPreviewFeature(preview);
+        return;
+      }
+      if (method === 'threePoints') {
+        const pp: PlaneFeature['parameters'] = {
+          method: 'threePoints',
+          reference: null,
+          offset: 0,
+          point1Id: np.point1Id ?? null,
+          point2Id: np.point2Id ?? null,
+          point3Id: np.point3Id ?? null,
+          point1Ref: np.point1Ref ?? null,
+          point2Ref: np.point2Ref ?? null,
+          point3Ref: np.point3Ref ?? null,
+        };
+        const pos1 = worldPositionFromPlanePointSlot(pp, 1, features);
+        const pos2 = worldPositionFromPlanePointSlot(pp, 2, features);
+        const pos3 = worldPositionFromPlanePointSlot(pp, 3, features);
+        if (
+          !pos1 ||
+          !pos2 ||
+          !pos3 ||
+          !planeThreePointPositionsArePairwiseDistinct(pos1, pos2, pos3) ||
+          !planeEquationFromPlaneFeature({ id: '', name: '', type: 'plane', parameters: pp }, features)
+        ) {
+          lastPreviewSigRef.current = null;
+          setTransientPreviewFeature(null);
+          return;
+        }
+        const preview: Feature = {
+          id,
+          name,
+          type: 'plane',
+          parameters: {
+            method: 'threePoints',
+            reference: null,
+            offset: 0,
+            point1Id: np.point1Id ?? null,
+            point2Id: np.point2Id ?? null,
+            point3Id: np.point3Id ?? null,
+            point1Ref: isPointRef(np.point1Ref ?? null) ? np.point1Ref : null,
+            point2Ref: isPointRef(np.point2Ref ?? null) ? np.point2Ref : null,
+            point3Ref: isPointRef(np.point3Ref ?? null) ? np.point3Ref : null,
+          },
+        };
+        const sig = JSON.stringify(preview);
+        if (lastPreviewSigRef.current === sig) return;
+        lastPreviewSigRef.current = sig;
+        setTransientPreviewFeature(preview);
+        return;
+      }
+    }
     lastPreviewSigRef.current = null;
     setTransientPreviewFeature(null);
-  }, [activeFeature, activeCommand, np, resolveSketchId, setTransientPreviewFeature]);
+  }, [activeFeature, activeCommand, np, resolveSketchId, setTransientPreviewFeature, features]);
 
   if (activeModule === 'sketch') return null;
   if (!activeFeature && !activeCommand) return null;
 
-  const title = activeFeature ? activeFeature.name : `New ${formatCommandLabel(activeCommand)}`;
+  const title = activeFeature ? activeFeature.name : `New ${formatCommandLabel(activeCommand!)}`;
 
   const closeDialog = () => {
     setSelectedFeatureId(null);
@@ -753,26 +958,31 @@ export const PropertyManager = () => {
       if (!af) return null;
       const p = af.parameters;
       if (p.method === 'twoPoints') {
-        const p1 = p.point1Id ? pointById.get(p.point1Id) : undefined;
-        const p2 = p.point2Id ? pointById.get(p.point2Id) : undefined;
-        if (!p1 || !p2) return null;
-        const o: [number, number, number] = [p1.parameters.x, p1.parameters.y, p1.parameters.z];
-        const dRaw: [number, number, number] = [
-          p2.parameters.x - p1.parameters.x,
-          p2.parameters.y - p1.parameters.y,
-          p2.parameters.z - p1.parameters.z,
-        ];
+        const o1 = worldPositionFromAxisTwoPointSlot(p, 1, features);
+        const o2 = worldPositionFromAxisTwoPointSlot(p, 2, features);
+        if (!o1 || !o2) return null;
+        const o: [number, number, number] = o1;
+        const dRaw: [number, number, number] = [o2[0] - o1[0], o2[1] - o1[1], o2[2] - o1[2]];
         const d = normalize(dRaw);
         if (!d) return null;
         return { p: o, d };
       }
       if (p.method === 'planePoint') {
         const pl = planeFromRef(p.planeRef ?? null);
-        const pt = p.pointId ? pointById.get(p.pointId) : undefined;
-        if (!pl || !pt) return null;
+        if (!pl) return null;
         const d = normalize(pl.n);
         if (!d) return null;
-        return { p: [pt.parameters.x, pt.parameters.y, pt.parameters.z], d };
+        const pref = p.pointRef;
+        let origin: [number, number, number] | null = null;
+        if (pref?.type === 'point' && Array.isArray(pref.position)) {
+          origin = [pref.position[0], pref.position[1], pref.position[2]];
+        } else if (p.pointId) {
+          const pt = pointById.get(p.pointId);
+          if (!pt) return null;
+          origin = [pt.parameters.x, pt.parameters.y, pt.parameters.z];
+        }
+        if (!origin) return null;
+        return { p: origin, d };
       }
       if (p.method === 'twoPlanes') {
         const pa = planeFromRef(p.planeRefA ?? null);
@@ -869,15 +1079,30 @@ export const PropertyManager = () => {
         const offset = parseOrStop(String(np.offset ?? 0));
         if (!Number.isFinite(offset)) return;
         if (method === 'threePoints') {
-          const p1 = String(np.point1Id ?? '');
-          const p2 = String(np.point2Id ?? '');
-          const p3 = String(np.point3Id ?? '');
-          if (!p1 || !p2 || !p3) {
+          const pp: PlaneFeature['parameters'] = {
+            method: 'threePoints',
+            reference: null,
+            offset: 0,
+            point1Id: np.point1Id ?? null,
+            point2Id: np.point2Id ?? null,
+            point3Id: np.point3Id ?? null,
+            point1Ref: np.point1Ref ?? null,
+            point2Ref: np.point2Ref ?? null,
+            point3Ref: np.point3Ref ?? null,
+          };
+          const pos1 = worldPositionFromPlanePointSlot(pp, 1, features);
+          const pos2 = worldPositionFromPlanePointSlot(pp, 2, features);
+          const pos3 = worldPositionFromPlanePointSlot(pp, 3, features);
+          if (!pos1 || !pos2 || !pos3) {
             setExprError('Select three points');
             return;
           }
-          if (new Set([p1, p2, p3]).size < 3) {
+          if (!planeThreePointPositionsArePairwiseDistinct(pos1, pos2, pos3)) {
             setExprError('Point 1, Point 2, and Point 3 must be different');
+            return;
+          }
+          if (!planeEquationFromPlaneFeature({ id: '', name: '', type: 'plane', parameters: pp }, features)) {
+            setExprError('The three points must not be collinear');
             return;
           }
         }
@@ -890,6 +1115,9 @@ export const PropertyManager = () => {
             point1Id: method === 'threePoints' ? (np.point1Id ?? null) : null,
             point2Id: method === 'threePoints' ? (np.point2Id ?? null) : null,
             point3Id: method === 'threePoints' ? (np.point3Id ?? null) : null,
+            point1Ref: method === 'threePoints' ? (isPointRef(np.point1Ref ?? null) ? np.point1Ref : null) : null,
+            point2Ref: method === 'threePoints' ? (isPointRef(np.point2Ref ?? null) ? np.point2Ref : null) : null,
+            point3Ref: method === 'threePoints' ? (isPointRef(np.point3Ref ?? null) ? np.point3Ref : null) : null,
           },
         };
         break;
@@ -904,19 +1132,31 @@ export const PropertyManager = () => {
             y = parseOrStop(String(np.y ?? 0));
             z = parseOrStop(String(np.z ?? 0));
           } else if (method === 'offsetPoint') {
-            const baseId = String(np.basePointId ?? '');
-            const base = pointById.get(baseId);
-            if (!base) {
-              setExprError('Select base point');
-              return;
-            }
             const dx = parseOrStop(String(np.dx ?? 0));
             const dy = parseOrStop(String(np.dy ?? 0));
             const dz = parseOrStop(String(np.dz ?? 0));
             if (!Number.isFinite(dx) || !Number.isFinite(dy) || !Number.isFinite(dz)) return;
-            x = base.parameters.x + dx;
-            y = base.parameters.y + dy;
-            z = base.parameters.z + dz;
+            const baseId = String(np.basePointId ?? '');
+            const base = pointById.get(baseId);
+            const pref = np.basePointRef;
+            let bx: number;
+            let by: number;
+            let bz: number;
+            if (base) {
+              bx = base.parameters.x;
+              by = base.parameters.y;
+              bz = base.parameters.z;
+            } else if (pref?.type === 'point' && pref.position) {
+              bx = pref.position[0];
+              by = pref.position[1];
+              bz = pref.position[2];
+            } else {
+              setExprError('Select base point');
+              return;
+            }
+            x = bx + dx;
+            y = by + dy;
+            z = bz + dz;
           } else if (method === 'planeAxisIntersection') {
             const pl = planeFromRef(np.planeRef ?? null);
             if (!pl) {
@@ -968,6 +1208,7 @@ export const PropertyManager = () => {
               ...(method === 'offsetPoint'
                 ? {
                     basePointId: np.basePointId ?? null,
+                    basePointRef: isPointRef(np.basePointRef ?? null) ? np.basePointRef : null,
                     dx: Number(np.dx ?? 0),
                     dy: Number(np.dy ?? 0),
                     dz: Number(np.dz ?? 0),
@@ -999,7 +1240,10 @@ export const PropertyManager = () => {
             method: np.method || 'twoPoints',
             point1Id: np.point1Id ?? null,
             point2Id: np.point2Id ?? null,
+            point1Ref: isPointRef(np.point1Ref ?? null) ? np.point1Ref : null,
+            point2Ref: isPointRef(np.point2Ref ?? null) ? np.point2Ref : null,
             pointId: np.pointId ?? null,
+            pointRef: isPointRef(np.pointRef ?? null) ? np.pointRef : null,
             planeRef: isPlaneRef(np.planeRef ?? null) ? np.planeRef : null,
             planeRefA: isPlaneRef(np.planeRefA ?? null) ? np.planeRefA : null,
             planeRefB: isPlaneRef(np.planeRefB ?? null) ? np.planeRefB : null,
@@ -1045,13 +1289,17 @@ export const PropertyManager = () => {
           const angle = parseOrStop(String(np.angle ?? 360));
           const startOffset = parseOrStop(String(np.startOffset ?? 0));
           if (!Number.isFinite(angle) || !Number.isFinite(startOffset)) return;
-          const axis: 'x' | 'y' | 'z' =
-            np.axis === 'x' || np.axis === 'y' || np.axis === 'z' ? np.axis : 'z';
+          const ra = np.revolveAxis as RevolveAxisSelection | undefined;
+          if (!ra || !isRevolveAxisRef(ra)) {
+            setExprError('Select a revolution axis');
+            return;
+          }
+          const legacyAxis: 'x' | 'y' | 'z' = ra.type === 'worldAxis' ? ra.axis : 'z';
           feature = {
             id,
             name,
             type: activeCommand === 'revolveCut' ? 'revolveCut' : 'revolve',
-            parameters: { sketchId, angle, axis, startOffset },
+            parameters: { sketchId, angle, startOffset, revolveAxis: ra, axis: legacyAxis },
           };
         }
         break;
@@ -1279,9 +1527,27 @@ export const PropertyManager = () => {
     const point1Id = isNew ? (np.point1Id ?? '') : (feat?.parameters.point1Id ?? '');
     const point2Id = isNew ? (np.point2Id ?? '') : (feat?.parameters.point2Id ?? '');
     const point3Id = isNew ? (np.point3Id ?? '') : (feat?.parameters.point3Id ?? '');
-    const setPlaneField = (key: 'point1Id' | 'point2Id' | 'point3Id', value: string) => {
-      if (isNew) updateNp({ [key]: value });
-      else updateFeatureParameter(activeFeature!.id, key, value);
+    const point1Ref = isNew ? (np.point1Ref ?? null) : (feat?.parameters.point1Ref ?? null);
+    const point2Ref = isNew ? (np.point2Ref ?? null) : (feat?.parameters.point2Ref ?? null);
+    const point3Ref = isNew ? (np.point3Ref ?? null) : (feat?.parameters.point3Ref ?? null);
+
+    const applyPlanePointSlot = (slot: 1 | 2 | 3, sel: Extract<GeometricSelectionRef, { type: 'point' }>) => {
+      const pf = points.find((p) => p.id === sel.featureId);
+      const idKey = slot === 1 ? 'point1Id' : slot === 2 ? 'point2Id' : 'point3Id';
+      const refKey = slot === 1 ? 'point1Ref' : slot === 2 ? 'point2Ref' : 'point3Ref';
+      if (pf) {
+        if (isNew) updateNp({ [idKey]: sel.featureId, [refKey]: sel });
+        else {
+          updateFeatureParameter(activeFeature!.id, idKey, sel.featureId);
+          updateFeatureParameter(activeFeature!.id, refKey, sel);
+        }
+      } else {
+        if (isNew) updateNp({ [idKey]: null, [refKey]: sel });
+        else {
+          updateFeatureParameter(activeFeature!.id, idKey, null);
+          updateFeatureParameter(activeFeature!.id, refKey, sel);
+        }
+      }
     };
 
     return (
@@ -1349,25 +1615,30 @@ export const PropertyManager = () => {
             <PointRefInput
               label="Point 1"
               value={point1Id}
+              pointRef={point1Ref}
               points={points}
               fieldKey="planePoint1Ref"
-              onChange={(id) => setPlaneField('point1Id', id)}
+              onChange={(sel) => applyPlanePointSlot(1, sel)}
             />
             <PointRefInput
               label="Point 2"
               value={point2Id}
+              pointRef={point2Ref}
               points={points}
               fieldKey="planePoint2Ref"
-              onChange={(id) => setPlaneField('point2Id', id)}
+              onChange={(sel) => applyPlanePointSlot(2, sel)}
             />
             <PointRefInput
               label="Point 3"
               value={point3Id}
+              pointRef={point3Ref}
               points={points}
               fieldKey="planePoint3Ref"
-              onChange={(id) => setPlaneField('point3Id', id)}
+              onChange={(sel) => applyPlanePointSlot(3, sel)}
             />
-            <p className="text-[11px] text-zinc-600">Pick three existing point features to define the plane.</p>
+            <p className="text-[11px] text-zinc-600">
+              Pick three non-collinear points (construction points or solid vertices).
+            </p>
           </div>
         )}
       </div>
@@ -1396,28 +1667,56 @@ export const PropertyManager = () => {
 
         {method === 'twoPoints' && (
           <>
-            <div>
-              <label className={labelCls}>Point 1</label>
-              <select
-                value={getVal('point1Id') ?? ''}
-                onChange={(e) => isNew ? updateNp({ point1Id: e.target.value }) : updateFeatureParameter(activeFeature!.id, 'point1Id', e.target.value)}
-                className={inputCls}
-              >
-                <option value="">Select point</option>
-                {points.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className={labelCls}>Point 2</label>
-              <select
-                value={getVal('point2Id') ?? ''}
-                onChange={(e) => isNew ? updateNp({ point2Id: e.target.value }) : updateFeatureParameter(activeFeature!.id, 'point2Id', e.target.value)}
-                className={inputCls}
-              >
-                <option value="">Select point</option>
-                {points.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </div>
+            <PointRefInput
+              label="Point 1"
+              value={getVal('point1Id') ?? ''}
+              pointRef={isNew ? (np.point1Ref ?? null) : ((feat?.parameters as AxisFeature['parameters'])?.point1Ref ?? null)}
+              points={points}
+              fieldKey="axisTwoPoints1Ref"
+              onChange={(sel) => {
+                const pf = points.find((p) => p.id === sel.featureId);
+                if (pf) {
+                  isNew
+                    ? updateNp({ point1Id: sel.featureId, point1Ref: sel })
+                    : (() => {
+                        updateFeatureParameter(activeFeature!.id, 'point1Id', sel.featureId);
+                        updateFeatureParameter(activeFeature!.id, 'point1Ref', sel);
+                      })();
+                } else {
+                  isNew
+                    ? updateNp({ point1Id: null, point1Ref: sel })
+                    : (() => {
+                        updateFeatureParameter(activeFeature!.id, 'point1Id', null);
+                        updateFeatureParameter(activeFeature!.id, 'point1Ref', sel);
+                      })();
+                }
+              }}
+            />
+            <PointRefInput
+              label="Point 2"
+              value={getVal('point2Id') ?? ''}
+              pointRef={isNew ? (np.point2Ref ?? null) : ((feat?.parameters as AxisFeature['parameters'])?.point2Ref ?? null)}
+              points={points}
+              fieldKey="axisTwoPoints2Ref"
+              onChange={(sel) => {
+                const pf = points.find((p) => p.id === sel.featureId);
+                if (pf) {
+                  isNew
+                    ? updateNp({ point2Id: sel.featureId, point2Ref: sel })
+                    : (() => {
+                        updateFeatureParameter(activeFeature!.id, 'point2Id', sel.featureId);
+                        updateFeatureParameter(activeFeature!.id, 'point2Ref', sel);
+                      })();
+                } else {
+                  isNew
+                    ? updateNp({ point2Id: null, point2Ref: sel })
+                    : (() => {
+                        updateFeatureParameter(activeFeature!.id, 'point2Id', null);
+                        updateFeatureParameter(activeFeature!.id, 'point2Ref', sel);
+                      })();
+                }
+              }}
+            />
           </>
         )}
 
@@ -1432,17 +1731,31 @@ export const PropertyManager = () => {
                 isNew ? updateNp({ planeRef: ref }) : updateFeatureParameter(activeFeature!.id, 'planeRef', ref);
               }}
             />
-            <div>
-              <label className={labelCls}>Point</label>
-              <select
-                value={getVal('pointId') ?? ''}
-                onChange={(e) => isNew ? updateNp({ pointId: e.target.value }) : updateFeatureParameter(activeFeature!.id, 'pointId', e.target.value)}
-                className={inputCls}
-              >
-                <option value="">Select point</option>
-                {points.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
-            </div>
+            <PointRefInput
+              label="Point"
+              value={getVal('pointId') ?? ''}
+              pointRef={isNew ? (np.pointRef ?? null) : ((feat?.parameters as AxisFeature['parameters'])?.pointRef ?? null)}
+              points={points}
+              fieldKey="axisPointRef"
+              onChange={(sel) => {
+                const pf = points.find((p) => p.id === sel.featureId);
+                if (pf) {
+                  isNew
+                    ? updateNp({ pointId: sel.featureId, pointRef: sel })
+                    : (() => {
+                        updateFeatureParameter(activeFeature!.id, 'pointId', sel.featureId);
+                        updateFeatureParameter(activeFeature!.id, 'pointRef', sel);
+                      })();
+                } else {
+                  isNew
+                    ? updateNp({ pointId: null, pointRef: sel })
+                    : (() => {
+                        updateFeatureParameter(activeFeature!.id, 'pointId', null);
+                        updateFeatureParameter(activeFeature!.id, 'pointRef', sel);
+                      })();
+                }
+              }}
+            />
           </>
         )}
 
@@ -1486,13 +1799,6 @@ export const PropertyManager = () => {
       : (feat?.parameters.targetFeatureId ?? selectedEdges[0]?.featureId ?? '');
     const targetName = solidTargetFeatures.find((f) => f.id === currentTarget)?.name ?? (selectedEdges[0]?.featureName ?? 'None');
     const edgeFieldKey = isFillet ? 'filletEdges' : 'chamferEdges';
-    const edgePickingActive = activeInputField === edgeFieldKey;
-
-    const edgeEquals = (a: Extract<GeometricSelectionRef, { type: 'edge' }>, b: Extract<GeometricSelectionRef, { type: 'edge' }>) =>
-      a.featureId === b.featureId &&
-      Math.abs(a.midpoint[0] - b.midpoint[0]) < 1e-6 &&
-      Math.abs(a.midpoint[1] - b.midpoint[1]) < 1e-6 &&
-      Math.abs(a.midpoint[2] - b.midpoint[2]) < 1e-6;
 
     const setEdges = (nextEdges: Extract<GeometricSelectionRef, { type: 'edge' }>[]) => {
       const targetFeatureId = nextEdges[0]?.featureId ?? '';
@@ -1504,6 +1810,10 @@ export const PropertyManager = () => {
     };
 
     const beginEdgePicking = () => {
+      if (isNew) {
+        startViewportEdgePickingForNewFilletChamfer(isFillet ? 'fillet' : 'chamfer', selectedEdges);
+        return;
+      }
       setExprError('');
       activateGeometricInput(
         edgeFieldKey,
@@ -1514,7 +1824,7 @@ export const PropertyManager = () => {
             setExprError('All selected edges must belong to the same target feature');
             return;
           }
-          if (selectedEdges.some((e) => edgeEquals(e, sel))) {
+          if (selectedEdges.some((e) => edgeRefsEqual(e, sel))) {
             return;
           }
           const nextEdges = [...selectedEdges, sel];
@@ -1528,7 +1838,7 @@ export const PropertyManager = () => {
         },
         {
           preselected: selectedEdges,
-          pickFromBeforeFeature: !isNew,
+          pickFromBeforeFeature: true,
         },
       );
     };
@@ -1667,6 +1977,7 @@ export const PropertyManager = () => {
         case 'revolveCut': {
           const feat = activeFeature as RevolveFeature | RevolveCutFeature;
           const so = feat.parameters.startOffset ?? 0;
+          const raResolved = resolveRevolveAxisForEdit(feat);
           return (
             <div className={sectionCls}>
               <div>
@@ -1676,12 +1987,31 @@ export const PropertyManager = () => {
                 </select>
               </div>
               <div>
-                <label className={labelCls}>Axis</label>
-                <select value={feat.parameters.axis} onChange={(e) => updateFeatureParameter(activeFeature.id, 'axis', e.target.value)} className={inputCls}>
-                  <option value="x">X Axis</option>
-                  <option value="y">Y Axis</option>
-                  <option value="z">Z Axis</option>
-                </select>
+                <SelectionInput
+                  label="Revolution axis"
+                  displayText={formatRevolveAxisDisplay(feat.parameters.revolveAxis, feat.parameters.axis)}
+                  fieldKey="revolveAxis"
+                  hasValue
+                  onActivate={() => {
+                    setExprError('');
+                    activateGeometricInput(
+                      'revolveAxis',
+                      (sel) => {
+                        if (!isRevolveAxisRef(sel)) return;
+                        updateFeatureParameter(activeFeature.id, 'revolveAxis', sel);
+                        if (sel.type === 'worldAxis') {
+                          updateFeatureParameter(activeFeature.id, 'axis', sel.axis);
+                        } else {
+                          updateFeatureParameter(activeFeature.id, 'axis', 'z');
+                        }
+                      },
+                      { preselected: [raResolved], pickFromBeforeFeature: true },
+                    );
+                  }}
+                />
+                <p className="mt-1 text-[11px] text-zinc-600">
+                  Origin X/Y/Z, a straight edge, or a construction axis feature.
+                </p>
               </div>
               <div>
                 <label className={labelCls}>Angle (deg)</label>
@@ -1749,7 +2079,10 @@ export const PropertyManager = () => {
               label="Sketch Plane"
               value={np.planeRef ?? null}
               fieldKey="sketchPlane"
-              onChange={(ref) => updateNp({ planeRef: ref })}
+              onChange={(ref) => {
+                updateNp({ planeRef: ref });
+                commitNewSketchAfterPlanePick(ref);
+              }}
             />
           </div>
         );
@@ -1787,9 +2120,17 @@ export const PropertyManager = () => {
                 <PointRefInput
                   label="Base Point"
                   value={np.basePointId ?? ''}
+                  pointRef={np.basePointRef ?? null}
                   points={points}
                   fieldKey="pointBaseRef"
-                  onChange={(id) => updateNp({ basePointId: id })}
+                  onChange={(sel) => {
+                    const pf = points.find((p) => p.id === sel.featureId);
+                    if (pf) {
+                      updateNp({ basePointId: sel.featureId, basePointRef: sel });
+                    } else {
+                      updateNp({ basePointId: null, basePointRef: sel });
+                    }
+                  }}
                 />
                 {(['dx', 'dy', 'dz'] as const).map((axis) => (
                   <div key={axis}>
@@ -1956,12 +2297,28 @@ export const PropertyManager = () => {
               onChange={(sketchId) => updateNp({ sketchId })}
             />
             <div>
-              <label className={labelCls}>Axis</label>
-              <select value={np.axis ?? 'z'} onChange={(e) => updateNp({ axis: e.target.value })} className={inputCls}>
-                <option value="x">X Axis</option>
-                <option value="y">Y Axis</option>
-                <option value="z">Z Axis</option>
-              </select>
+              <SelectionInput
+                label="Revolution axis"
+                displayText={formatRevolveAxisDisplay(np.revolveAxis as RevolveAxisSelection, np.axis)}
+                fieldKey="revolveAxis"
+                hasValue={!!np.revolveAxis && isRevolveAxisRef(np.revolveAxis as GeometricSelectionRef)}
+                onActivate={() => {
+                  setExprError('');
+                  const cur = np.revolveAxis as RevolveAxisSelection | undefined;
+                  const pre = cur && isRevolveAxisRef(cur) ? [cur] : [];
+                  activateGeometricInput(
+                    'revolveAxis',
+                    (sel) => {
+                      if (!isRevolveAxisRef(sel)) return;
+                      updateNp({ revolveAxis: sel });
+                    },
+                    { preselected: pre },
+                  );
+                }}
+              />
+              <p className="mt-1 text-[11px] text-zinc-600">
+                Origin X/Y/Z, a straight edge, or a construction axis feature.
+              </p>
             </div>
             <div>
               <label className={labelCls}>Angle (deg)</label>

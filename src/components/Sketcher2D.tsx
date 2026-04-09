@@ -5,13 +5,23 @@ import {
   type SelectionItem,
   type SketchLine,
   type SketchArc,
+  type SketchBspline,
   SKETCH_REF_X_AXIS_ID,
   SKETCH_REF_Y_AXIS_ID,
 } from '../store/useSketchStore';
 import * as THREE from 'three';
 import { initCAD, isCADReady, buildSectionSketchOverlay2D } from '../lib/cadEngine';
 import { sampleArcPoints, segmentCrossesPositiveXAxis } from '../lib/sketchArcPoints';
+import {
+  BSPLINE_DEFAULT_DEGREE,
+  BSPLINE_DEFAULT_SAMPLES_PER_SPAN,
+  BSPLINE_HIT_SAMPLES_PER_SPAN,
+  sampleOpenUniformBSpline,
+} from '../lib/sketchBspline';
 import { mergeCoincidentSketchVertices, pickNextEdgeInFace, snapClosedPolyline } from '../lib/sketchLoopDetection';
+
+/** World snap cursor position; `snapped` is set when the cursor locked to an existing sketch point (see `snapWorld`). */
+type SketchDrawSnap = { x: number; y: number; snapped?: string | null };
 import { featuresToCadFeatureInputs } from '../lib/cadFeatureInputs';
 import {
   solveConstraints,
@@ -290,7 +300,8 @@ function getPlaneNormalAndD(plane: string, offset = 0): { normal: THREE.Vector3;
 function getPointIdsForEntityDrag(
   entity: SelectionItem,
   lines: SketchLine[],
-  arcs: SketchArc[]
+  arcs: SketchArc[],
+  bsplines: SketchBspline[]
 ): string[] | null {
   if (entity.type === 'line') {
     if (entity.id === SKETCH_REF_X_AXIS_ID || entity.id === SKETCH_REF_Y_AXIS_ID) return null;
@@ -302,6 +313,11 @@ function getPointIdsForEntityDrag(
     const a = arcs.find((x) => x.id === entity.id);
     if (!a) return null;
     return [a.centerId, a.startId, a.endId];
+  }
+  if (entity.type === 'bspline') {
+    const b = bsplines.find((x) => x.id === entity.id);
+    if (!b) return null;
+    return [...b.controlPointIds];
   }
   return null;
 }
@@ -320,6 +336,7 @@ export const Sketcher2D: React.FC = () => {
     lines,
     circles,
     arcs,
+    bsplines,
     constraints,
     selection,
     statusMessage,
@@ -328,7 +345,9 @@ export const Sketcher2D: React.FC = () => {
     addCircle,
     setCircleRadius,
     addArc,
+    addBspline,
     applyConstraint,
+    addCoincidentBetweenPoints,
     toggleSelect,
     clearSelection,
     deleteSelected,
@@ -382,7 +401,7 @@ export const Sketcher2D: React.FC = () => {
   });
 
   // Drawing state
-  const [drawPts, setDrawPts] = useState<{ x: number; y: number }[]>([]);
+  const [drawPts, setDrawPts] = useState<SketchDrawSnap[]>([]);
   /** While placing arc third point: Shift = complementary (longer) arc branch. */
   const [arcShiftHeld, setArcShiftHeld] = useState(false);
   /** Toggled when the cursor segment crosses the +x ray from arc center (0°), not at the atan2 ±π seam. */
@@ -406,6 +425,8 @@ export const Sketcher2D: React.FC = () => {
     baseDy: number;
     axisX: number;
     axisY: number;
+    /** Circle radius: drag sets `radiusDimAngle` from cursor vs center (rotation about center). */
+    radiusCircleRotate?: boolean;
   } | null>(null);
 
   const [sketchContextMenu, setSketchContextMenu] = useState<{
@@ -431,6 +452,26 @@ export const Sketcher2D: React.FC = () => {
 
   const snapEnabled = true;
   const gridSnap = 0.5;
+  /** World-space radius matching `snapWorld` (8 screen px) — used to detect nearby points for coincident. */
+  const worldSnapThreshold = Math.max(1e-12, 8 / zoom);
+
+  /** New sketch vertex at (x,y); if snapped to or near an existing point, adds a real coincident constraint (◉). */
+  const placeSketchPoint = useCallback(
+    (x: number, y: number, cursorSnappedId: string | null | undefined) => {
+      let existingId: string | null = null;
+      if (cursorSnappedId) {
+        existingId = cursorSnappedId;
+      } else {
+        existingId = findNearestPoint(x, y, worldSnapThreshold);
+      }
+      const newId = addPoint(x, y);
+      if (existingId && existingId !== newId) {
+        addCoincidentBetweenPoints(newId, existingId, { skipHistory: true });
+      }
+      return newId;
+    },
+    [findNearestPoint, addPoint, worldSnapThreshold, addCoincidentBetweenPoints]
+  );
 
   useEffect(() => {
     const el = containerRef.current;
@@ -478,7 +519,12 @@ export const Sketcher2D: React.FC = () => {
   );
 
   const isDrawingTool = (cmd: string | null) =>
-    cmd === 'line' || cmd === 'polyline' || cmd === 'circle' || cmd === 'arc' || cmd === 'rectangle';
+    cmd === 'line' ||
+    cmd === 'polyline' ||
+    cmd === 'circle' ||
+    cmd === 'arc' ||
+    cmd === 'rectangle' ||
+    cmd === 'bspline';
   const isMultiSelectEvent = (e: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean }) =>
     e.shiftKey || e.ctrlKey || e.metaKey;
   const isProtectedOriginFixConstraint = useCallback(
@@ -541,6 +587,17 @@ export const Sketcher2D: React.FC = () => {
           inBox.push({ type: 'arc', id: aItem.id });
         }
       }
+      for (const bItem of bsplines) {
+        const deg = bItem.degree ?? BSPLINE_DEFAULT_DEGREE;
+        const ctrl = bItem.controlPointIds
+          .map((pid) => points.find((p) => p.id === pid))
+          .filter((p): p is NonNullable<typeof p> => !!p);
+        if (ctrl.length !== bItem.controlPointIds.length || ctrl.length < deg + 1) continue;
+        const samples = sampleOpenUniformBSpline(ctrl, deg, BSPLINE_HIT_SAMPLES_PER_SPAN);
+        if (samples.every((pt) => inside(pt.x, pt.y))) {
+          inBox.push({ type: 'bspline', id: bItem.id });
+        }
+      }
       const labels: Record<string, string> = {
         fix: 'FIX',
         coincident: '◉',
@@ -591,7 +648,7 @@ export const Sketcher2D: React.FC = () => {
         useSketchStore.setState({ selection: boxed });
       }
     },
-    [screenToWorld, points, lines, circles, arcs, constraints, isProtectedOriginFixConstraint]
+    [screenToWorld, points, lines, circles, arcs, bsplines, constraints, isProtectedOriginFixConstraint]
   );
 
   const handlePointerDown = useCallback(
@@ -704,7 +761,7 @@ export const Sketcher2D: React.FC = () => {
               setIsDraggingCircleRadius(true);
               (e.target as Element).setPointerCapture?.(e.pointerId);
             } else {
-              const dragIds = getPointIdsForEntityDrag(entity, lines, arcs);
+              const dragIds = getPointIdsForEntityDrag(entity, lines, arcs, bsplines);
               if (dragIds && dragIds.length > 0) {
                 draggingPointIdRef.current = null;
                 setDraggingPointId(null);
@@ -743,9 +800,9 @@ export const Sketcher2D: React.FC = () => {
           setDrawPts([snap]);
         } else {
           pushSketchHistory();
-          const startSnap = findNearestPoint(drawPts[0].x, drawPts[0].y, 0.01);
-          const startId = startSnap || addPoint(drawPts[0].x, drawPts[0].y);
-          const endId = snap.snapped || addPoint(snap.x, snap.y);
+          const d0 = drawPts[0];
+          const startId = placeSketchPoint(d0.x, d0.y, d0.snapped);
+          const endId = placeSketchPoint(snap.x, snap.y, snap.snapped);
           addLine(startId, endId);
           setDrawPts([]);
         }
@@ -755,9 +812,8 @@ export const Sketcher2D: React.FC = () => {
         } else {
           pushSketchHistory();
           const prev = drawPts[drawPts.length - 1];
-          const existPrev = findNearestPoint(prev.x, prev.y, 0.01);
-          const prevId = existPrev || addPoint(prev.x, prev.y);
-          const endId = snap.snapped || addPoint(snap.x, snap.y);
+          const prevId = placeSketchPoint(prev.x, prev.y, prev.snapped);
+          const endId = placeSketchPoint(snap.x, snap.y, snap.snapped);
           addLine(prevId, endId);
           setDrawPts([...drawPts, snap]);
         }
@@ -769,8 +825,7 @@ export const Sketcher2D: React.FC = () => {
           const radius = Math.sqrt((snap.x - center.x) ** 2 + (snap.y - center.y) ** 2);
           if (radius > 0.01) {
             pushSketchHistory();
-            const existCenter = findNearestPoint(center.x, center.y, 0.01);
-            const centerId = existCenter || addPoint(center.x, center.y);
+            const centerId = placeSketchPoint(center.x, center.y, center.snapped);
             addCircle(centerId, radius);
           }
           setDrawPts([]);
@@ -794,14 +849,11 @@ export const Sketcher2D: React.FC = () => {
             const endX = center.x + radius * Math.cos(angle);
             const endY = center.y + radius * Math.sin(angle);
 
-            const existCenter = findNearestPoint(center.x, center.y, 0.01);
-            const centerId = existCenter || addPoint(center.x, center.y);
-            const existStart = findNearestPoint(startPt.x, startPt.y, 0.01);
-            const startId = existStart || addPoint(startPt.x, startPt.y);
+            const centerId = placeSketchPoint(center.x, center.y, center.snapped);
+            const startId = placeSketchPoint(startPt.x, startPt.y, startPt.snapped);
             // Must snap end to an existing corner when it coincides (e.g. arc closes a rectangle
             // after deleting a side). A duplicate point id breaks the edge graph and region fill.
-            const existEnd = findNearestPoint(endX, endY, 0.01);
-            const endId = existEnd || addPoint(endX, endY);
+            const endId = placeSketchPoint(endX, endY, undefined);
             addArc(centerId, startId, endId, arcAutoComplementary !== e.shiftKey);
           }
           setDrawPts([]);
@@ -814,10 +866,10 @@ export const Sketcher2D: React.FC = () => {
           const c2 = snap;
           if (Math.abs(c2.x - c1.x) > 0.01 && Math.abs(c2.y - c1.y) > 0.01) {
             pushSketchHistory();
-            const p1 = addPoint(c1.x, c1.y);
-            const p2 = addPoint(c2.x, c1.y);
-            const p3 = addPoint(c2.x, c2.y);
-            const p4 = addPoint(c1.x, c2.y);
+            const p1 = placeSketchPoint(c1.x, c1.y, c1.snapped);
+            const p2 = placeSketchPoint(c2.x, c1.y, undefined);
+            const p3 = placeSketchPoint(c2.x, c2.y, c2.snapped);
+            const p4 = placeSketchPoint(c1.x, c2.y, undefined);
             const l1 = addLine(p1, p2);
             const l2 = addLine(p2, p3);
             const l3 = addLine(p3, p4);
@@ -837,6 +889,8 @@ export const Sketcher2D: React.FC = () => {
           }
           setDrawPts([]);
         }
+      } else if (activeCommand === 'bspline') {
+        setDrawPts((prev) => [...prev, snap]);
       }
     },
     [
@@ -853,6 +907,7 @@ export const Sketcher2D: React.FC = () => {
       addCircle,
       addArc,
       applyConstraint,
+      placeSketchPoint,
       findNearestPoint,
       findNearestEntity,
       constraints,
@@ -861,6 +916,7 @@ export const Sketcher2D: React.FC = () => {
       lines,
       circles,
       arcs,
+      bsplines,
       points,
       isMultiSelectEvent,
       toggleSelect,
@@ -910,6 +966,18 @@ export const Sketcher2D: React.FC = () => {
       }
 
       if (draggingDimension) {
+        if (draggingDimension.radiusCircleRotate) {
+          const { constraints: cList, circles: circList, points: ptList } = useSketchStore.getState();
+          const cn = cList.find((cc) => cc.id === draggingDimension.id);
+          const eid = cn?.entityIds[0];
+          const circ = eid ? circList.find((ci) => ci.id === eid) : undefined;
+          const center = circ ? ptList.find((p) => p.id === circ.centerId) : undefined;
+          if (center) {
+            const ang = Math.atan2(world.y - center.y, world.x - center.x);
+            updateConstraintParams(draggingDimension.id, { radiusDimAngle: ang });
+          }
+          return;
+        }
         const ddx = world.x - draggingDimension.startX;
         const ddy = world.y - draggingDimension.startY;
         // Constrain drag to dimension's single degree of freedom.
@@ -1065,12 +1133,39 @@ export const Sketcher2D: React.FC = () => {
     return () => el.removeEventListener('wheel', onWheel);
   }, [activeModule]);
 
+  const finalizeBsplineDraw = useCallback(() => {
+    if (activeCommand !== 'bspline') return;
+    if (drawPts.length >= 4) {
+      pushSketchHistory();
+      const ids: string[] = [];
+      for (const dp of drawPts) {
+        ids.push(placeSketchPoint(dp.x, dp.y, dp.snapped));
+      }
+      addBspline(ids);
+      setDrawPts([]);
+      setStatusMessage('B-spline created');
+    } else if (drawPts.length > 0) {
+      setStatusMessage('B-spline needs at least 4 control points');
+    }
+  }, [
+    activeCommand,
+    drawPts,
+    setStatusMessage,
+    pushSketchHistory,
+    placeSketchPoint,
+    addBspline,
+  ]);
+
   const handleDoubleClick = useCallback(() => {
+    if (activeCommand === 'bspline') {
+      finalizeBsplineDraw();
+      return;
+    }
     if (activeCommand === 'polyline' && drawPts.length > 0) {
       setDrawPts([]);
       setStatusMessage('Polyline finished');
     }
-  }, [activeCommand, drawPts, setStatusMessage]);
+  }, [activeCommand, drawPts, setStatusMessage, finalizeBsplineDraw]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -1099,6 +1194,18 @@ export const Sketcher2D: React.FC = () => {
         redoSketch();
         return;
       }
+      if (activeCommand === 'bspline' && e.key === 'Enter') {
+        e.preventDefault();
+        finalizeBsplineDraw();
+        return;
+      }
+      if (activeCommand === 'bspline' && e.key === 'Escape') {
+        e.preventDefault();
+        setDrawPts([]);
+        setActiveCommand(null);
+        setStatusMessage('');
+        return;
+      }
       if (e.key === 'Escape') {
         setDrawPts([]);
         clearSelection();
@@ -1116,6 +1223,7 @@ export const Sketcher2D: React.FC = () => {
     return () => window.removeEventListener('keydown', handler);
   }, [
     activeModule,
+    activeCommand,
     undoSketch,
     redoSketch,
     clearSelection,
@@ -1124,6 +1232,7 @@ export const Sketcher2D: React.FC = () => {
     selection.length,
     setActiveCommand,
     setStatusMessage,
+    finalizeBsplineDraw,
   ]);
 
   useEffect(() => {
@@ -1362,13 +1471,23 @@ export const Sketcher2D: React.FC = () => {
     return ids;
   }, [dofState]);
   const isSketchFullyConstrained = useMemo(() => {
-    if (points.length === 0 && lines.length === 0 && arcs.length === 0 && circles.length === 0) return false;
+    if (
+      points.length === 0 &&
+      lines.length === 0 &&
+      arcs.length === 0 &&
+      circles.length === 0 &&
+      bsplines.length === 0
+    )
+      return false;
     const pointOk = points.every((p) => dofState.pointDoF.get(p.id) === 0);
     const lineOk = lines.every((l) => dofState.lineDoF.get(l.id) === 0);
     const arcOk = arcs.every((a) => dofState.arcDoF.get(a.id) === 0);
     const circleOk = circles.every((c) => dofState.circleDoF.get(c.id) === 0);
-    return pointOk && lineOk && arcOk && circleOk;
-  }, [points, lines, arcs, circles, dofState]);
+    const bsplineOk = bsplines.every((b) =>
+      b.controlPointIds.every((pid) => dofState.pointDoF.get(pid) === 0)
+    );
+    return pointOk && lineOk && arcOk && circleOk && bsplineOk;
+  }, [points, lines, arcs, circles, bsplines, dofState]);
 
   const getEntityColor = useCallback(
     (type: string, id: string) => {
@@ -1543,15 +1662,23 @@ export const Sketcher2D: React.FC = () => {
         if (circ) {
           const center = points.find((p) => p.id === circ.centerId);
           if (center) {
+            const th = Number(c.params?.radiusDimAngle ?? 0);
+            const ux = Math.cos(th);
+            const uy = Math.sin(th);
+            const r = circ.radius;
+            const mx = center.x + (r * 0.5) * ux;
+            const my = center.y + (r * 0.5) * uy;
+            const px = -uy * off * 0.5;
+            const py = ux * off * 0.5;
             dims.push({
               id: c.id, type: c.type,
               x1: center.x + labelDx, y1: center.y + labelDy,
-              x2: center.x + circ.radius + labelDx, y2: center.y + labelDy,
-              labelX: center.x + circ.radius / 2 + labelDx, labelY: center.y + off * 0.5 + labelDy,
+              x2: center.x + r * ux + labelDx, y2: center.y + r * uy + labelDy,
+              labelX: mx + labelDx + px, labelY: my + labelDy + py,
               text: `R${c.params.radius.toFixed(2)}`,
               offsetDir: 'radial',
-              dragAxisX: 1,
-              dragAxisY: 0,
+              dragAxisX: 0,
+              dragAxisY: 1,
             });
           }
         }
@@ -1570,8 +1697,8 @@ export const Sketcher2D: React.FC = () => {
               labelX: (center.x + start.x) / 2 + labelDx, labelY: (center.y + start.y) / 2 + off * 0.5 + labelDy,
               text: `R${c.params.radius.toFixed(2)}`,
               offsetDir: 'radial',
-              dragAxisX: rdx / rlen,
-              dragAxisY: rdy / rlen,
+              dragAxisX: -rdy / rlen,
+              dragAxisY: rdx / rlen,
             });
           }
         }
@@ -1739,7 +1866,7 @@ export const Sketcher2D: React.FC = () => {
   const handleSketchContextToggleAux = useCallback(() => {
     if (!sketchContextMenu) return;
     const t = sketchContextMenu.item.type;
-    if (t !== 'line' && t !== 'circle' && t !== 'arc') return;
+    if (t !== 'line' && t !== 'circle' && t !== 'arc' && t !== 'bspline') return;
     useSketchStore.setState({ selection: [sketchContextMenu.item] });
     toggleAuxiliarySelected();
     setSketchContextMenu(null);
@@ -1800,7 +1927,14 @@ export const Sketcher2D: React.FC = () => {
   }, [activeCommand, drawPts, snappedCursor, arcShiftHeld, arcAutoComplementary]);
 
   const renderArcPath = useCallback(
-    (arcItem: { centerId: string; startId: string; endId: string; id: string; auxiliary?: boolean }) => {
+    (arcItem: {
+      centerId: string;
+      startId: string;
+      endId: string;
+      id: string;
+      complementaryArc?: boolean;
+      auxiliary?: boolean;
+    }) => {
       const center = points.find((p) => p.id === arcItem.centerId);
       const start = points.find((p) => p.id === arcItem.startId);
       const end = points.find((p) => p.id === arcItem.endId);
@@ -1821,6 +1955,38 @@ export const Sketcher2D: React.FC = () => {
         <path
           key={arcItem.id}
           d={`M ${arcPts[0].x} ${arcPts[0].y} L ${arcPts.slice(1).map((p) => `${p.x} ${p.y}`).join(' L ')}`}
+          stroke={color}
+          strokeWidth={sw}
+          fill="none"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          strokeDasharray={dash}
+        />
+      );
+    },
+    [points, zoom, getEntityColor]
+  );
+
+  const renderBsplinePath = useCallback(
+    (b: SketchBspline) => {
+      const deg = b.degree ?? BSPLINE_DEFAULT_DEGREE;
+      const ctrl: { x: number; y: number }[] = [];
+      for (const id of b.controlPointIds) {
+        const p = points.find((q) => q.id === id);
+        if (!p) return null;
+        ctrl.push({ x: p.x, y: p.y });
+      }
+      if (ctrl.length < deg + 1) return null;
+      const splinePts = sampleOpenUniformBSpline(ctrl, deg, BSPLINE_DEFAULT_SAMPLES_PER_SPAN);
+      if (splinePts.length < 2) return null;
+      const color = getEntityColor('bspline', b.id);
+      const sw = 2 / zoom;
+      const inv = 1 / zoom;
+      const dash = b.auxiliary ? `${4 * inv} ${3 * inv}` : undefined;
+      return (
+        <path
+          key={b.id}
+          d={`M ${splinePts[0].x} ${splinePts[0].y} L ${splinePts.slice(1).map((p) => `${p.x} ${p.y}`).join(' L ')}`}
           stroke={color}
           strokeWidth={sw}
           fill="none"
@@ -1925,6 +2091,20 @@ export const Sketcher2D: React.FC = () => {
         path,
       });
     }
+    for (const bs of bsplines) {
+      if (bs.auxiliary) continue;
+      const deg = bs.degree ?? BSPLINE_DEFAULT_DEGREE;
+      const cids = bs.controlPointIds.map((id) => canonical(id));
+      const ctrl = cids
+        .map((id) => ptMap.get(id))
+        .filter((p): p is { x: number; y: number } => !!p);
+      if (ctrl.length !== cids.length || ctrl.length < deg + 1) continue;
+      const path = sampleOpenUniformBSpline(ctrl, deg, BSPLINE_DEFAULT_SAMPLES_PER_SPAN);
+      if (path.length < 2) continue;
+      const va = cids[0]!;
+      const vb = cids[cids.length - 1]!;
+      edges.push({ id: `bspline_${bs.id}`, a: va, b: vb, path });
+    }
 
     // Traverse unused edges into closed node loops
     const adj = new Map<string, { edgeId: string; other: string }[]>();
@@ -2025,7 +2205,7 @@ export const Sketcher2D: React.FC = () => {
     }
 
     return regions;
-  }, [points, lines, arcs, circles, constraints]);
+  }, [points, lines, arcs, bsplines, circles, constraints]);
 
   // Early return AFTER all hooks
   if (activeModule !== 'sketch') return null;
@@ -2062,6 +2242,7 @@ export const Sketcher2D: React.FC = () => {
     ? {
         line: 'Click start point, then end point',
         polyline: 'Click points. Double-click to finish',
+        bspline: 'Click 4+ control points. Double-click or Enter to create — Esc exits tool',
         circle: 'Click center, then drag radius',
         arc: 'Center, start, end on circle — hold Shift for the other arc branch',
         rectangle: 'Click first corner, then opposite corner',
@@ -2209,6 +2390,9 @@ export const Sketcher2D: React.FC = () => {
           {/* Arcs */}
           {arcs.map(renderArcPath)}
 
+          {/* B-splines */}
+          {bsplines.map(renderBsplinePath)}
+
           {/* Points */}
           {points.map((pt) => {
             const color = getPointColor(pt.id);
@@ -2294,6 +2478,45 @@ export const Sketcher2D: React.FC = () => {
             />
           )}
 
+          {/* Temp: B-spline control polygon + preview curve */}
+          {activeCommand === 'bspline' &&
+            drawPts.length >= 2 &&
+            drawPts.map((dp, i) => {
+              if (i === 0) return null;
+              const prev = drawPts[i - 1];
+              return (
+                <line
+                  key={`bspctrl${i}`}
+                  x1={prev.x}
+                  y1={prev.y}
+                  x2={dp.x}
+                  y2={dp.y}
+                  stroke={COLORS.temp}
+                  strokeWidth={invScale}
+                  strokeDasharray={`${3 * invScale}`}
+                />
+              );
+            })}
+          {activeCommand === 'bspline' &&
+            drawPts.length >= 4 &&
+            (() => {
+              const sp = sampleOpenUniformBSpline(
+                drawPts,
+                BSPLINE_DEFAULT_DEGREE,
+                BSPLINE_DEFAULT_SAMPLES_PER_SPAN
+              );
+              if (sp.length < 2) return null;
+              return (
+                <path
+                  d={`M ${sp[0].x} ${sp[0].y} L ${sp.slice(1).map((p) => `${p.x} ${p.y}`).join(' L ')}`}
+                  stroke={COLORS.temp}
+                  strokeWidth={2 * invScale}
+                  fill="none"
+                  strokeLinecap="round"
+                />
+              );
+            })()}
+
           {/* Temp geometry: Rectangle */}
           {drawPts.length === 1 && activeCommand === 'rectangle' && (
             <rect
@@ -2342,6 +2565,11 @@ export const Sketcher2D: React.FC = () => {
 
         {/* Dimension annotations */}
         {dimensionAnnotations.map((dim) => {
+          const constr = constraints.find((cc) => cc.id === dim.id);
+          const isRadiusCircle =
+            !!constr?.entityIds[0] &&
+            constr?.type === 'radius' &&
+            circles.some((ci) => ci.id === constr.entityIds[0]);
           const s1 = worldToScreen(dim.x1, dim.y1);
           const s2 = worldToScreen(dim.x2, dim.y2);
           const sLabel = worldToScreen(dim.labelX, dim.labelY);
@@ -2351,15 +2579,37 @@ export const Sketcher2D: React.FC = () => {
           const len = Math.sqrt(dx * dx + dy * dy) || 1;
           const ux = dx / len, uy = dy / len;
 
+          const onDimPointerDown = (e: React.PointerEvent) => {
+            e.stopPropagation();
+            toggleSelect({ type: 'constraint', id: dim.id }, isMultiSelectEvent(e));
+            const baseDx = Number(constr?.params?.labelDx ?? 0);
+            const baseDy = Number(constr?.params?.labelDy ?? 0);
+            const world = screenToWorld(e.clientX, e.clientY);
+            pushSketchHistory();
+            setDraggingDimension({
+              id: dim.id,
+              startX: world.x,
+              startY: world.y,
+              baseDx,
+              baseDy,
+              axisX: dim.dragAxisX,
+              axisY: dim.dragAxisY,
+              radiusCircleRotate: isRadiusCircle,
+            });
+            (e.target as Element).setPointerCapture?.(e.pointerId);
+          };
+
           return (
             <g key={`dim_${dim.id}`}>
               {/* Dimension line */}
               <line x1={s1.x} y1={s1.y} x2={s2.x} y2={s2.y}
                 stroke={dimColor} strokeWidth={1} opacity={0.8}
+                style={{ cursor: 'move' }}
                 onClick={(e) => {
                   e.stopPropagation();
                   toggleSelect({ type: 'constraint', id: dim.id }, isMultiSelectEvent(e));
                 }}
+                onPointerDown={onDimPointerDown}
               />
               {/* Arrow at start */}
               {len > arrowSize * 3 && (
@@ -2400,25 +2650,7 @@ export const Sketcher2D: React.FC = () => {
                 strokeWidth={0.5}
                 strokeOpacity={0.5}
                 style={{ cursor: 'move' }}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  toggleSelect({ type: 'constraint', id: dim.id }, isMultiSelectEvent(e));
-                  const c = constraints.find((cc) => cc.id === dim.id);
-                  const baseDx = Number(c?.params?.labelDx ?? 0);
-                  const baseDy = Number(c?.params?.labelDy ?? 0);
-                  const world = screenToWorld(e.clientX, e.clientY);
-                  pushSketchHistory();
-                  setDraggingDimension({
-                    id: dim.id,
-                    startX: world.x,
-                    startY: world.y,
-                    baseDx,
-                    baseDy,
-                    axisX: dim.dragAxisX,
-                    axisY: dim.dragAxisY,
-                  });
-                  (e.target as Element).setPointerCapture?.(e.pointerId);
-                }}
+                onPointerDown={onDimPointerDown}
                 onDoubleClick={(e) => {
                   e.stopPropagation();
                   requestEditDimension(dim.id);
@@ -2434,25 +2666,7 @@ export const Sketcher2D: React.FC = () => {
                 fontFamily="monospace"
                 textAnchor="middle"
                 style={{ cursor: 'move', userSelect: 'none' }}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  toggleSelect({ type: 'constraint', id: dim.id }, isMultiSelectEvent(e));
-                  const c = constraints.find((cc) => cc.id === dim.id);
-                  const baseDx = Number(c?.params?.labelDx ?? 0);
-                  const baseDy = Number(c?.params?.labelDy ?? 0);
-                  const world = screenToWorld(e.clientX, e.clientY);
-                  pushSketchHistory();
-                  setDraggingDimension({
-                    id: dim.id,
-                    startX: world.x,
-                    startY: world.y,
-                    baseDx,
-                    baseDy,
-                    axisX: dim.dragAxisX,
-                    axisY: dim.dragAxisY,
-                  });
-                  (e.target as Element).setPointerCapture?.(e.pointerId);
-                }}
+                onPointerDown={onDimPointerDown}
                 onDoubleClick={(e) => {
                   e.stopPropagation();
                   requestEditDimension(dim.id);
@@ -2522,7 +2736,8 @@ export const Sketcher2D: React.FC = () => {
           </button>
           {(sketchContextMenu.item.type === 'line' ||
             sketchContextMenu.item.type === 'circle' ||
-            sketchContextMenu.item.type === 'arc') && (
+            sketchContextMenu.item.type === 'arc' ||
+            sketchContextMenu.item.type === 'bspline') && (
             <button
               type="button"
               onClick={handleSketchContextToggleAux}

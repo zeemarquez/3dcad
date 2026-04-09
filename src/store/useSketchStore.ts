@@ -8,6 +8,11 @@ import {
   type SolverConstraint,
 } from '../lib/constraintSolver';
 import { sampleArcPoints } from '../lib/sketchArcPoints';
+import {
+  BSPLINE_DEFAULT_DEGREE,
+  BSPLINE_HIT_SAMPLES_PER_SPAN,
+  sampleOpenUniformBSpline,
+} from '../lib/sketchBspline';
 
 export const SKETCH_REF_ORIGIN_ID = '__ref_origin__';
 export const SKETCH_REF_X_AXIS_ID = '__ref_x_axis__';
@@ -44,6 +49,14 @@ export interface SketchArc {
   auxiliary?: boolean;
 }
 
+/** Open uniform B-spline; default degree 3 (cubic), minimum degree+1 control points. */
+export interface SketchBspline {
+  id: string;
+  controlPointIds: string[];
+  degree?: number;
+  auxiliary?: boolean;
+}
+
 export type ConstraintType =
   | 'fix'
   | 'coincident'
@@ -74,7 +87,7 @@ export interface SketchConstraint {
 }
 
 export interface SelectionItem {
-  type: 'point' | 'line' | 'circle' | 'arc' | 'constraint';
+  type: 'point' | 'line' | 'circle' | 'arc' | 'bspline' | 'constraint';
   id: string;
 }
 
@@ -83,6 +96,7 @@ export interface SketchDataSnapshot {
   lines: SketchLine[];
   circles: SketchCircle[];
   arcs: SketchArc[];
+  bsplines?: SketchBspline[];
   constraints: SketchConstraint[];
 }
 
@@ -92,6 +106,7 @@ export interface SketchHistorySnapshot {
   lines: SketchLine[];
   circles: SketchCircle[];
   arcs: SketchArc[];
+  bsplines?: SketchBspline[];
   constraints: SketchConstraint[];
   selection: SelectionItem[];
   statusMessage: string;
@@ -109,6 +124,7 @@ function cloneSketchHistorySnapshot(s: SketchState): SketchHistorySnapshot {
     lines: structuredClone(s.lines),
     circles: structuredClone(s.circles),
     arcs: structuredClone(s.arcs),
+    bsplines: structuredClone(s.bsplines),
     constraints: structuredClone(s.constraints),
     selection: structuredClone(s.selection),
     statusMessage: s.statusMessage,
@@ -126,7 +142,6 @@ export interface DimensionInputRequest {
   defaultExpression?: string;
   entityIds: string[];
   paramKey: 'distance' | 'radius' | 'angle';
-  circleIdToUpdate?: string;
 }
 
 interface SketchState {
@@ -134,6 +149,7 @@ interface SketchState {
   lines: SketchLine[];
   circles: SketchCircle[];
   arcs: SketchArc[];
+  bsplines: SketchBspline[];
   constraints: SketchConstraint[];
   selection: SelectionItem[];
   statusMessage: string;
@@ -145,9 +161,16 @@ interface SketchState {
   addCircle: (centerId: string, radius: number) => string;
   setCircleRadius: (circleId: string, radius: number) => void;
   addArc: (centerId: string, startId: string, endId: string, complementaryArc?: boolean) => string;
+  addBspline: (controlPointIds: string[], degree?: number) => string;
 
   applyConstraint: (
     type: ConstraintType,
+    options?: { skipHistory?: boolean }
+  ) => { success: boolean; message: string };
+  /** Point–point coincident (e.g. sketch tools snapping to existing geometry). Shows ◉ like manual coincident. */
+  addCoincidentBetweenPoints: (
+    pointIdA: string,
+    pointIdB: string,
     options?: { skipHistory?: boolean }
   ) => { success: boolean; message: string };
   beginConstraintSelection: (type: ConstraintType) => void;
@@ -287,11 +310,128 @@ function equalizeSymmetryCircleRadii(
   return out;
 }
 
+/**
+ * Radius dimensions store the value on the constraint; circle radius is edited by dragging the
+ * rim (`setCircleRadius`). When a dimension exists, that stored radius must win over the drag.
+ * Also checks symmetry partners: a dimension on one circle locks the paired circle's radius too.
+ */
+function lockedRadiusForCircle(
+  constraints: SketchConstraint[],
+  circleId: string
+): number | undefined {
+  const pr = constraints.find(
+    (c) =>
+      c.type === 'radius' &&
+      c.entityIds[0] === circleId &&
+      c.params?.radius != null &&
+      Number.isFinite(c.params.radius)
+  )?.params?.radius;
+  if (pr != null) return Math.max(1e-4, pr);
+
+  for (const cn of constraints) {
+    if (cn.type !== 'symmetry' || cn.entityIds.length !== 3) continue;
+    const idA = cn.entityIds[1];
+    const idB = cn.entityIds[2];
+    if (idA !== circleId && idB !== circleId) continue;
+    const partner = circleId === idA ? idB : idA;
+    const partnerR = constraints.find(
+      (c) =>
+        c.type === 'radius' &&
+        c.entityIds[0] === partner &&
+        c.params?.radius != null &&
+        Number.isFinite(c.params.radius)
+    )?.params?.radius;
+    if (partnerR != null) return Math.max(1e-4, partnerR);
+  }
+  return undefined;
+}
+
+/**
+ * Applies a radius dimension value to sketch geometry. Circle radius is stored on the circle
+ * entity (the constraint solver only drives arc start–center distance). Arc endpoints are
+ * scaled radially from the center so the sweep is preserved.
+ */
+export function applyRadiusValueToSketchGeometry(
+  points: SketchPoint[],
+  circles: SketchCircle[],
+  arcs: SketchArc[],
+  constraints: SketchConstraint[],
+  entityId: string,
+  radius: number
+): { points: SketchPoint[]; circles: SketchCircle[] } {
+  const r = Math.max(1e-4, radius);
+  const circ = circles.find((c) => c.id === entityId);
+  if (circ) {
+    let nextCircles = circles.map((c) => (c.id === entityId ? { ...c, radius: r } : c));
+    for (const cn of constraints) {
+      if (cn.type !== 'symmetry' || cn.entityIds.length !== 3) continue;
+      const idA = cn.entityIds[1];
+      const idB = cn.entityIds[2];
+      if (idA !== entityId && idB !== entityId) continue;
+      const partnerId = entityId === idA ? idB : idA;
+      if (!nextCircles.some((c) => c.id === partnerId)) continue;
+      nextCircles = nextCircles.map((c) => (c.id === partnerId ? { ...c, radius: r } : c));
+    }
+    return { points, circles: nextCircles };
+  }
+  const arc = arcs.find((a) => a.id === entityId);
+  if (arc) {
+    const center = points.find((p) => p.id === arc.centerId);
+    if (!center) return { points, circles };
+    const scalePoint = (pid: string): SketchPoint | undefined => {
+      const p = points.find((pt) => pt.id === pid);
+      if (!p) return undefined;
+      const dx = p.x - center.x;
+      const dy = p.y - center.y;
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-12) return { ...p, x: center.x + r, y: center.y };
+      const s = r / len;
+      return { ...p, x: center.x + dx * s, y: center.y + dy * s };
+    };
+    const ns = scalePoint(arc.startId);
+    const ne = scalePoint(arc.endId);
+    const nextPoints = points.map((p) => {
+      if (p.id === arc.startId && ns) return ns;
+      if (p.id === arc.endId && ne) return ne;
+      return p;
+    });
+    return { points: nextPoints, circles };
+  }
+  return { points, circles };
+}
+
+/**
+ * Re-solves sketch constraints after a driven dimension value changes outside the sketcher
+ * (e.g. Parameters dialog). Updating `params` alone does not move points; the solver must run.
+ */
+export function resolveSketchDataAfterDimensionValueChange(sketchData: SketchDataSnapshot): SketchDataSnapshot {
+  const { points, lines, circles, arcs, constraints } = sketchData;
+  if (constraints.length === 0 || points.length === 0) return sketchData;
+
+  const result = solveConstraints(
+    points as SolverPoint[],
+    lines as SolverLine[],
+    circles as SolverCircle[],
+    arcs as SolverArc[],
+    constraints as SolverConstraint[]
+  );
+
+  if (result.points.length === 0) return sketchData;
+
+  const nextCircles = equalizeSymmetryCircleRadii(circles, constraints);
+  return {
+    ...sketchData,
+    points: result.points as SketchPoint[],
+    circles: nextCircles,
+  };
+}
+
 export const useSketchStore = create<SketchState>((set, get) => ({
   points: INITIAL_SKETCH_SEED.points,
   lines: [],
   circles: [],
   arcs: [],
+  bsplines: [],
   constraints: INITIAL_SKETCH_SEED.constraints,
   selection: [],
   statusMessage: '',
@@ -320,6 +460,7 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       const newPast = s.sketchUndoPast.slice(0, -1);
       set({
         ...prev,
+        bsplines: prev.bsplines ?? [],
         sketchUndoPast: newPast,
         sketchUndoFuture: [...s.sketchUndoFuture, current],
       });
@@ -339,6 +480,7 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       const newFuture = s.sketchUndoFuture.slice(0, -1);
       set({
         ...next,
+        bsplines: next.bsplines ?? [],
         sketchUndoPast: [...s.sketchUndoPast, current].slice(-SKETCH_HISTORY_MAX),
         sketchUndoFuture: newFuture,
       });
@@ -367,8 +509,9 @@ export const useSketchStore = create<SketchState>((set, get) => ({
   },
 
   setCircleRadius: (circleId: string, radius: number) => {
-    const r = Math.max(1e-4, radius);
     set((s) => {
+      const locked = lockedRadiusForCircle(s.constraints, circleId);
+      const r = Math.max(1e-4, locked ?? radius);
       let circles = s.circles.map((c) => (c.id === circleId ? { ...c, radius: r } : c));
       for (const cn of s.constraints) {
         if (cn.type !== 'symmetry' || cn.entityIds.length !== 3) continue;
@@ -406,6 +549,23 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       constraints: [
         ...s.constraints,
         { id: arcConstraintId, type: 'arcRadius' as ConstraintType, entityIds: [id] },
+      ],
+    }));
+    return id;
+  },
+
+  addBspline: (controlPointIds: string[], degree = BSPLINE_DEFAULT_DEGREE) => {
+    const id = uid();
+    const p = Math.max(1, Math.min(degree, 8));
+    if (controlPointIds.length < p + 1) return id;
+    set((s) => ({
+      bsplines: [
+        ...s.bsplines,
+        {
+          id,
+          controlPointIds: [...controlPointIds],
+          degree: p,
+        },
       ],
     }));
     return id;
@@ -623,7 +783,6 @@ export const useSketchStore = create<SketchState>((set, get) => ({
               defaultValue: circ.radius,
               entityIds: [selCircles[0].id],
               paramKey: 'radius',
-              circleIdToUpdate: circ.id,
             };
             valid = true;
           }
@@ -773,6 +932,52 @@ export const useSketchStore = create<SketchState>((set, get) => ({
     return { success: true, message: `${appliedLabel} constraint applied` };
   },
 
+  addCoincidentBetweenPoints: (pointIdA, pointIdB, options) => {
+    if (pointIdA === pointIdB) {
+      return { success: false, message: 'Same point' };
+    }
+    const state = get();
+    const pa = state.points.some((p) => p.id === pointIdA);
+    const pb = state.points.some((p) => p.id === pointIdB);
+    if (!pa || !pb) {
+      return { success: false, message: 'Point not found' };
+    }
+    const dup = state.constraints.some(
+      (c) =>
+        c.type === 'coincident' &&
+        c.entityIds.length === 2 &&
+        ((c.entityIds[0] === pointIdA && c.entityIds[1] === pointIdB) ||
+          (c.entityIds[0] === pointIdB && c.entityIds[1] === pointIdA))
+    );
+    if (dup) {
+      return { success: true, message: 'Already coincident' };
+    }
+
+    if (!options?.skipHistory) {
+      get().pushSketchHistory();
+    }
+
+    const constraintId = uid();
+    const newConstraint: SketchConstraint = {
+      id: constraintId,
+      type: 'coincident',
+      entityIds: [pointIdA, pointIdB],
+    };
+
+    set((s) => {
+      const nextConstraints = [...s.constraints, newConstraint];
+      const circles = equalizeSymmetryCircleRadii(s.circles, nextConstraints);
+      return { constraints: nextConstraints, circles };
+    });
+
+    get().solveConstraints();
+
+    if (!options?.skipHistory) {
+      set({ statusMessage: 'Coincident constraint applied' });
+    }
+    return { success: true, message: 'Coincident constraint applied' };
+  },
+
   beginConstraintSelection: (type: ConstraintType) => {
     const hints: Record<string, string> = {
       fix: 'Select 1 point',
@@ -817,12 +1022,24 @@ export const useSketchStore = create<SketchState>((set, get) => ({
 
     const params: Record<string, number> = { [req.paramKey]: parsed };
     set((s) => {
-      const circles = req.circleIdToUpdate
-        ? s.circles.map((c) => (c.id === req.circleIdToUpdate ? { ...c, radius: parsed } : c))
-        : s.circles;
+      let circles = s.circles;
+      let points = s.points;
+      if (req.paramKey === 'radius' && req.entityIds[0]) {
+        const g = applyRadiusValueToSketchGeometry(
+          s.points,
+          s.circles,
+          s.arcs,
+          s.constraints,
+          req.entityIds[0],
+          parsed
+        );
+        points = g.points;
+        circles = g.circles;
+      }
 
       if (req.mode === 'edit' && req.constraintId) {
         return {
+          points,
           circles,
           constraints: s.constraints.map((c) => {
             if (c.id !== req.constraintId) return c;
@@ -846,6 +1063,7 @@ export const useSketchStore = create<SketchState>((set, get) => ({
         ...(sourceExpression?.trim().startsWith('=') ? { expression: sourceExpression.trim() } : {}),
       };
       return {
+        points,
         circles,
         constraints: [...s.constraints, newConstraint],
         pendingDimensionInput: null,
@@ -1046,6 +1264,9 @@ export const useSketchStore = create<SketchState>((set, get) => ({
     const selectedArcIds = new Set(
       state.selection.filter((s) => s.type === 'arc').map((s) => s.id)
     );
+    const selectedBsplineIds = new Set(
+      state.selection.filter((s) => s.type === 'bspline').map((s) => s.id)
+    );
     const selectedConstraintIds = new Set(
       state.selection.filter((s) => s.type === 'constraint').map((s) => s.id)
     );
@@ -1068,15 +1289,22 @@ export const useSketchStore = create<SketchState>((set, get) => ({
         selectedPointIds.has(a.startId) ||
         selectedPointIds.has(a.endId)
     );
+    const bsplinesToDelete = state.bsplines.filter(
+      (b) =>
+        selectedBsplineIds.has(b.id) ||
+        b.controlPointIds.some((pid) => selectedPointIds.has(pid))
+    );
 
     const allDeletedLineIds = new Set(linesToDelete.map((l) => l.id));
     const allDeletedCircleIds = new Set(circlesToDelete.map((c) => c.id));
     const allDeletedArcIds = new Set(arcsToDelete.map((a) => a.id));
+    const allDeletedBsplineIds = new Set(bsplinesToDelete.map((b) => b.id));
     const allDeletedEntityIds = new Set([
       ...selectedPointIds,
       ...allDeletedLineIds,
       ...allDeletedCircleIds,
       ...allDeletedArcIds,
+      ...allDeletedBsplineIds,
     ]);
 
     const orphanPointIds = new Set<string>();
@@ -1090,10 +1318,14 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       orphanPointIds.add(a.startId);
       orphanPointIds.add(a.endId);
     }
+    for (const b of bsplinesToDelete) {
+      for (const pid of b.controlPointIds) orphanPointIds.add(pid);
+    }
 
     const remainingLines = state.lines.filter((l) => !allDeletedLineIds.has(l.id));
     const remainingCircles = state.circles.filter((c) => !allDeletedCircleIds.has(c.id));
     const remainingArcs = state.arcs.filter((a) => !allDeletedArcIds.has(a.id));
+    const remainingBsplines = state.bsplines.filter((b) => !allDeletedBsplineIds.has(b.id));
 
     const usedPointIds = new Set<string>();
     for (const l of remainingLines) {
@@ -1105,6 +1337,9 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       usedPointIds.add(a.centerId);
       usedPointIds.add(a.startId);
       usedPointIds.add(a.endId);
+    }
+    for (const b of remainingBsplines) {
+      for (const pid of b.controlPointIds) usedPointIds.add(pid);
     }
 
     const pointsToRemove = new Set<string>(selectedPointIds);
@@ -1124,6 +1359,7 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       lines: remainingLines,
       circles: remainingCircles,
       arcs: remainingArcs,
+      bsplines: remainingBsplines,
       constraints: newConstraints,
       selection: [],
     });
@@ -1135,7 +1371,8 @@ export const useSketchStore = create<SketchState>((set, get) => ({
     const hasCurve =
       sel0.some((x) => x.type === 'line') ||
       sel0.some((x) => x.type === 'circle') ||
-      sel0.some((x) => x.type === 'arc');
+      sel0.some((x) => x.type === 'arc') ||
+      sel0.some((x) => x.type === 'bspline');
     if (!hasCurve) return;
     get().pushSketchHistory();
     set((s) => {
@@ -1143,7 +1380,8 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       const lineIds = new Set(sel.filter((x) => x.type === 'line').map((x) => x.id));
       const circleIds = new Set(sel.filter((x) => x.type === 'circle').map((x) => x.id));
       const arcIds = new Set(sel.filter((x) => x.type === 'arc').map((x) => x.id));
-      if (lineIds.size === 0 && circleIds.size === 0 && arcIds.size === 0) return s;
+      const bsplineIds = new Set(sel.filter((x) => x.type === 'bspline').map((x) => x.id));
+      if (lineIds.size === 0 && circleIds.size === 0 && arcIds.size === 0 && bsplineIds.size === 0) return s;
       return {
         lines: s.lines.map((l) =>
           lineIds.has(l.id) ? { ...l, auxiliary: !l.auxiliary } : l
@@ -1153,6 +1391,9 @@ export const useSketchStore = create<SketchState>((set, get) => ({
         ),
         arcs: s.arcs.map((a) =>
           arcIds.has(a.id) ? { ...a, auxiliary: !a.auxiliary } : a
+        ),
+        bsplines: s.bsplines.map((b) =>
+          bsplineIds.has(b.id) ? { ...b, auxiliary: !b.auxiliary } : b
         ),
       };
     });
@@ -1166,6 +1407,7 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       lines: [],
       circles: [],
       arcs: [],
+      bsplines: [],
       constraints: seeded.constraints,
       selection: [],
       statusMessage: '',
@@ -1188,6 +1430,7 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       lines: data.lines || [],
       circles: data.circles || [],
       arcs: data.arcs || [],
+      bsplines: data.bsplines || [],
       constraints: seeded.constraints,
       selection: [],
       statusMessage: '',
@@ -1205,6 +1448,7 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       lines: s.lines,
       circles: s.circles,
       arcs: s.arcs,
+      bsplines: s.bsplines,
       constraints: s.constraints,
     };
   },
@@ -1284,6 +1528,31 @@ export const useSketchStore = create<SketchState>((set, get) => ({
       if (dArc < bestDist) {
         bestDist = dArc;
         best = { type: 'arc', id: a.id };
+      }
+    }
+
+    for (const b of state.bsplines) {
+      const deg = b.degree ?? BSPLINE_DEFAULT_DEGREE;
+      const ctrl = b.controlPointIds
+        .map((pid) => state.points.find((p) => p.id === pid))
+        .filter((p): p is SketchPoint => !!p);
+      if (ctrl.length !== b.controlPointIds.length || ctrl.length < deg + 1) continue;
+      const samples = sampleOpenUniformBSpline(ctrl, deg, BSPLINE_HIT_SAMPLES_PER_SPAN);
+      let dMin = Infinity;
+      for (let i = 0; i < samples.length - 1; i++) {
+        const ds = distToSegment(
+          x,
+          y,
+          samples[i].x,
+          samples[i].y,
+          samples[i + 1].x,
+          samples[i + 1].y
+        );
+        if (ds < dMin) dMin = ds;
+      }
+      if (dMin < bestDist) {
+        bestDist = dMin;
+        best = { type: 'bspline', id: b.id };
       }
     }
 

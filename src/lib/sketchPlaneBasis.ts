@@ -1,5 +1,6 @@
 import { useCadStore } from '../store/useCadStore';
 import type {
+  AxisFeature,
   Feature,
   GeometricSelectionRef,
   PlaneFeature,
@@ -32,7 +33,7 @@ export interface SketchPlaneBasis {
   n: [number, number, number];
 }
 
-function dot3(a: [number, number, number], b: [number, number, number]): number {
+export function dot3(a: [number, number, number], b: [number, number, number]): number {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
 
@@ -50,7 +51,7 @@ function sketchBasisFromUnitNormalAndDistance(n: [number, number, number], d: nu
   return { origin, u, v, n: nn };
 }
 
-function planeEquationFromRef(ref: GeometricSelectionRef | null, features: Feature[]): { n: [number, number, number]; d: number } | null {
+export function planeEquationFromRef(ref: GeometricSelectionRef | null, features: Feature[]): { n: [number, number, number]; d: number } | null {
   if (!ref) return null;
   if (ref.type === 'defaultPlane') {
     if (ref.name === 'xy') return { n: [0, 0, 1], d: 0 };
@@ -71,7 +72,60 @@ function planeEquationFromRef(ref: GeometricSelectionRef | null, features: Featu
   return null;
 }
 
-function planeEquationFromPlaneFeature(pf: PlaneFeature, features: Feature[]): { n: [number, number, number]; d: number } | null {
+/** Resolve one corner of “plane by three points” from a point feature id and/or body-vertex ref */
+export function worldPositionFromPlanePointSlot(
+  p: PlaneFeature['parameters'],
+  slot: 1 | 2 | 3,
+  features: Feature[],
+): [number, number, number] | null {
+  const pointById = new Map(
+    features.filter((f): f is PointFeature => f.type === 'point').map((f) => [f.id, f]),
+  );
+  const id = slot === 1 ? p.point1Id : slot === 2 ? p.point2Id : p.point3Id;
+  const ref = slot === 1 ? p.point1Ref : slot === 2 ? p.point2Ref : p.point3Ref;
+  if (id) {
+    const t = pointById.get(id);
+    if (t) return [t.parameters.x, t.parameters.y, t.parameters.z];
+  }
+  if (ref?.type === 'point' && ref.position) {
+    return [ref.position[0], ref.position[1], ref.position[2]];
+  }
+  return null;
+}
+
+/** Axis “by two points”: resolve endpoint from point feature id and/or body-vertex ref */
+export function worldPositionFromAxisTwoPointSlot(
+  p: AxisFeature['parameters'],
+  slot: 1 | 2,
+  features: Feature[],
+): [number, number, number] | null {
+  const pointById = new Map(
+    features.filter((f): f is PointFeature => f.type === 'point').map((f) => [f.id, f]),
+  );
+  const id = slot === 1 ? p.point1Id : p.point2Id;
+  const ref = slot === 1 ? p.point1Ref : p.point2Ref;
+  if (id) {
+    const t = pointById.get(id);
+    if (t) return [t.parameters.x, t.parameters.y, t.parameters.z];
+  }
+  if (ref?.type === 'point' && ref.position) {
+    return [ref.position[0], ref.position[1], ref.position[2]];
+  }
+  return null;
+}
+
+export function planeThreePointPositionsArePairwiseDistinct(
+  p1: [number, number, number],
+  p2: [number, number, number],
+  p3: [number, number, number],
+  eps = 1e-3,
+): boolean {
+  const d = (a: [number, number, number], b: [number, number, number]) =>
+    Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  return d(p1, p2) > eps && d(p1, p3) > eps && d(p2, p3) > eps;
+}
+
+export function planeEquationFromPlaneFeature(pf: PlaneFeature, features: Feature[]): { n: [number, number, number]; d: number } | null {
   const p = pf.parameters;
   if (p.method === 'offset') {
     const ref = p.reference;
@@ -82,27 +136,20 @@ function planeEquationFromPlaneFeature(pf: PlaneFeature, features: Feature[]): {
     return { n: pl.n, d: pl.d + off };
   }
   if (p.method === 'threePoints') {
-    const pointById = new Map(
-      features.filter((f): f is PointFeature => f.type === 'point').map((f) => [f.id, f]),
-    );
-    const id1 = p.point1Id;
-    const id2 = p.point2Id;
-    const id3 = p.point3Id;
-    if (!id1 || !id2 || !id3) return null;
-    const t1 = pointById.get(id1);
-    const t2 = pointById.get(id2);
-    const t3 = pointById.get(id3);
-    if (!t1 || !t2 || !t3) return null;
-    const p1: [number, number, number] = [t1.parameters.x, t1.parameters.y, t1.parameters.z];
-    const p2: [number, number, number] = [t2.parameters.x, t2.parameters.y, t2.parameters.z];
-    const p3: [number, number, number] = [t3.parameters.x, t3.parameters.y, t3.parameters.z];
-    const e1 = sub3(p2, p1);
-    const e2 = sub3(p3, p1);
+    const wp1 = worldPositionFromPlanePointSlot(p, 1, features);
+    const wp2 = worldPositionFromPlanePointSlot(p, 2, features);
+    const wp3 = worldPositionFromPlanePointSlot(p, 3, features);
+    if (!wp1 || !wp2 || !wp3) return null;
+    const t1 = wp1;
+    const t2 = wp2;
+    const t3 = wp3;
+    const e1 = sub3(t2, t1);
+    const e2 = sub3(t3, t1);
     const nc = cross3(e1, e2);
     const len = Math.hypot(nc[0], nc[1], nc[2]);
     if (len < 1e-12) return null;
     const n: [number, number, number] = [nc[0] / len, nc[1] / len, nc[2] / len];
-    const d = dot3(n, p1);
+    const d = dot3(n, t1);
     return { n, d };
   }
   return null;

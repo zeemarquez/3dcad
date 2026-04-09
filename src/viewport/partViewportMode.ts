@@ -3,7 +3,15 @@ import { useCadStore } from '../store/useCadStore';
 import type { Feature } from '../store/useCadStore';
 
 /** Geometry kinds that can be filtered in part viewport selection mode */
-export type PartViewportGeometryKind = 'sketch' | 'face' | 'edge' | 'point' | 'defaultPlane' | 'plane';
+export type PartViewportGeometryKind =
+  | 'sketch'
+  | 'face'
+  | 'edge'
+  | 'point'
+  | 'defaultPlane'
+  | 'plane'
+  | 'worldAxis'
+  | 'axisFeature';
 
 export type PartViewportMode =
   | { type: 'normal' }
@@ -31,6 +39,10 @@ const POINT_ONLY_INPUT_FIELDS = new Set([
   'planePoint2Ref',
   'planePoint3Ref',
   'pointBaseRef',
+  /** Axis: plane + point — viewport picks construction points or solid vertices */
+  'axisPointRef',
+  'axisTwoPoints1Ref',
+  'axisTwoPoints2Ref',
 ]);
 
 /**
@@ -38,6 +50,7 @@ const POINT_ONLY_INPUT_FIELDS = new Set([
  * Keep in sync with SelectionInput / GeometricInput field keys.
  */
 export function allowedGeometryKindsFromField(field: string): PartViewportGeometryKind[] {
+  if (field === 'revolveAxis') return ['edge', 'worldAxis', 'axisFeature'];
   if (field.endsWith('Edges')) return ['edge'];
   if (field.startsWith('sketch_')) return ['sketch'];
   if (PLANE_FACE_INPUT_FIELDS.has(field)) return ['face', 'defaultPlane', 'plane'];
