@@ -1,7 +1,7 @@
 import React from 'react';
 import { MousePointer } from 'lucide-react';
-import { useCadStore, type GeometricSelectionRef, type PointFeature } from '../store/useCadStore';
-import { isPointRef } from '../lib/geoSelectionRef';
+import { useCadStore, type GeometricSelectionRef, type PointFeature } from '@/modules/part/store/useCadStore';
+import { isPointRef } from '@/core/geoSelectionRef';
 
 const labelCls = 'block text-xs font-medium text-zinc-600 mb-1.5';
 

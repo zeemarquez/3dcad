@@ -14,16 +14,16 @@ import {
   type Feature,
   type GeometricSelectionRef,
   type RevolveAxisSelection,
-} from '../store/useCadStore';
+} from '@/modules/part/store/useCadStore';
 import { X, MousePointer, ChevronsLeftRight, ArrowRightLeft } from 'lucide-react';
 import { PointRefInput } from './PointRefInput';
-import { isPlaneRef, isPointRef, isEdgeRef, isRevolveAxisRef } from '../lib/geoSelectionRef';
+import { isPlaneRef, isPointRef, isEdgeRef, isRevolveAxisRef } from '@/core/geoSelectionRef';
 import {
   worldPositionFromPlanePointSlot,
   worldPositionFromAxisTwoPointSlot,
   planeThreePointPositionsArePairwiseDistinct,
   planeEquationFromPlaneFeature,
-} from '../lib/sketchPlaneBasis';
+} from '@/core/sketchPlaneBasis';
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Shared input classes

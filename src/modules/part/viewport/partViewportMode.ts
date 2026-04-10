@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
-import { useCadStore } from '../store/useCadStore';
-import type { Feature } from '../store/useCadStore';
+import { useCadStore } from '@/modules/part/store/useCadStore';
+import type { Feature } from '@/modules/part/store/useCadStore';
 
 /** Geometry kinds that can be filtered in part viewport selection mode */
 export type PartViewportGeometryKind =

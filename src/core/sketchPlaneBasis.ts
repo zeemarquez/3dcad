@@ -1,4 +1,4 @@
-import { useCadStore } from '../store/useCadStore';
+import { useCadStore } from '@/modules/part/store/useCadStore';
 import type {
   AxisFeature,
   Feature,
@@ -6,7 +6,7 @@ import type {
   PlaneFeature,
   PointFeature,
   SketchFeature,
-} from '../store/useCadStore';
+} from '@/modules/part/store/useCadStore';
 
 export function normalize3(v: [number, number, number]): [number, number, number] {
   const l = Math.hypot(v[0], v[1], v[2]);

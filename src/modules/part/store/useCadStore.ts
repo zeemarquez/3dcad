@@ -407,7 +407,7 @@ function cloneInitialFeatures(): Feature[] {
 // Worker (kept for future OCCT precision operations)
 // ──────────────────────────────────────────────────────────────────────────────
 
-const cadWorker = new Worker(new URL('../lib/cadWorker.ts', import.meta.url), { type: 'module' });
+const cadWorker = new Worker(new URL('../kernel/cadWorker.ts', import.meta.url), { type: 'module' });
 
 let _geoSelectionCb: ((sel: GeometricSelectionRef) => void) | null = null;
 let _previewFeatureSig: string | null = null;

@@ -1,17 +1,17 @@
 import opencascade from "replicad-opencascadejs/src/replicad_single.js";
 import opencascadeWasm from "replicad-opencascadejs/src/replicad_single.wasm?url";
 import { setOC, draw, drawRectangle, drawProjection, drawSingleCircle, Plane, revolution, type Point, type Shape3D } from "replicad";
-import type { GeometricSelectionRef, SketchFeature } from "../store/useCadStore";
-import { cross3, normalize3, getSketchPlaneBasis, worldToSketch2D } from "./sketchPlaneBasis";
-import { sampleArcPoints } from "./sketchArcPoints";
+import type { GeometricSelectionRef, SketchFeature } from '../store/useCadStore';
+import { cross3, normalize3, getSketchPlaneBasis, worldToSketch2D } from '@/core/sketchPlaneBasis';
+import { sampleArcPoints } from '@/core/sketchArcPoints';
 import {
   BSPLINE_DEFAULT_DEGREE,
   BSPLINE_DEFAULT_SAMPLES_PER_SPAN,
   BSPLINE_HIT_SAMPLES_PER_SPAN,
   sampleOpenUniformBSpline,
   uniformBsplineToCubicBezierSegments,
-} from "./sketchBspline";
-import { mergeCoincidentSketchVertices, pickNextEdgeInFace } from "./sketchLoopDetection";
+} from '@/core/sketchBspline';
+import { mergeCoincidentSketchVertices, pickNextEdgeInFace } from '@/core/sketchLoopDetection';
 import type { ShapeMesh } from "replicad";
 
 let _ready = false;

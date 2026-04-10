@@ -1,4 +1,4 @@
-import type { PartDocumentData, PartDocumentMeta } from '../store/useCadStore';
+import type { PartDocumentData, PartDocumentMeta } from '@/modules/part/store/useCadStore';
 
 const STORAGE_KEYS = {
   index: 'moderncad.docs.index.v1',

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { useCadStore, type SketchFeature } from '../store/useCadStore';
+import { useCadStore, type SketchFeature } from '@/modules/part/store/useCadStore';
 import {
   useSketchStore,
   type SelectionItem,
@@ -8,20 +8,20 @@ import {
   type SketchBspline,
   SKETCH_REF_X_AXIS_ID,
   SKETCH_REF_Y_AXIS_ID,
-} from '../store/useSketchStore';
-import { initCAD, isCADReady, buildSectionSketchOverlay2D } from '../lib/cadEngine';
-import { sampleArcPoints, segmentCrossesPositiveXAxis } from '../lib/sketchArcPoints';
+} from '@/modules/part/store/useSketchStore';
+import { initCAD, isCADReady, buildSectionSketchOverlay2D } from '@/modules/part/kernel/cadEngine';
+import { sampleArcPoints, segmentCrossesPositiveXAxis } from '@/core/sketchArcPoints';
 import {
   BSPLINE_DEFAULT_DEGREE,
   BSPLINE_DEFAULT_SAMPLES_PER_SPAN,
   BSPLINE_HIT_SAMPLES_PER_SPAN,
   sampleOpenUniformBSpline,
-} from '../lib/sketchBspline';
-import { mergeCoincidentSketchVertices, pickNextEdgeInFace, snapClosedPolyline } from '../lib/sketchLoopDetection';
+} from '@/core/sketchBspline';
+import { mergeCoincidentSketchVertices, pickNextEdgeInFace, snapClosedPolyline } from '@/core/sketchLoopDetection';
 
 /** World snap cursor position; `snapped` is set when the cursor locked to an existing sketch point (see `snapWorld`). */
 type SketchDrawSnap = { x: number; y: number; snapped?: string | null };
-import { featuresToCadFeatureInputs } from '../lib/cadFeatureInputs';
+import { featuresToCadFeatureInputs } from '@/modules/part/kernel/cadFeatureInputs';
 import {
   solveConstraints,
   type SolverPoint,
@@ -29,7 +29,7 @@ import {
   type SolverCircle,
   type SolverArc,
   type SolverConstraint,
-} from '../lib/constraintSolver';
+} from '@/core/constraintSolver';
 
 function evaluateInputExpression(
   raw: string,
@@ -96,6 +96,60 @@ const DIMENSION_TYPES = new Set([
   'angle',
   'distance',
 ]);
+
+/** Degrees — cursor within this angle of horizontal/vertical from anchor snaps orthogonally while drawing lines. */
+const LINE_ANCHOR_ORTHO_SNAP_DEG = 6;
+
+/**
+ * Snap (wx, wy) to horizontal or vertical through (ax, ay) when within maxAngleDeg of that axis.
+ * When both axes qualify (e.g. near 45°), picks the closer alignment.
+ */
+function snapLineEndpointToAnchorOrtho(
+  ax: number,
+  ay: number,
+  wx: number,
+  wy: number,
+  maxAngleDeg: number
+): { x: number; y: number; mode: 'horizontal' | 'vertical' | null } {
+  const dx = wx - ax;
+  const dy = wy - ay;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-12) return { x: wx, y: wy, mode: null };
+  const thr = (maxAngleDeg * Math.PI) / 180;
+  const sinThr = Math.sin(thr);
+  const sinFromH = Math.abs(dy) / len;
+  const sinFromV = Math.abs(dx) / len;
+  const nearH = sinFromH <= sinThr;
+  const nearV = sinFromV <= sinThr;
+  if (nearH && nearV) {
+    return sinFromH <= sinFromV
+      ? { x: wx, y: ay, mode: 'horizontal' }
+      : { x: ax, y: wy, mode: 'vertical' };
+  }
+  if (nearH) return { x: wx, y: ay, mode: 'horizontal' };
+  if (nearV) return { x: ax, y: wy, mode: 'vertical' };
+  return { x: wx, y: wy, mode: null };
+}
+
+/** If endpoints form a horizontal or vertical segment, apply the matching constraint (single history entry). */
+function applyHorizontalOrVerticalConstraintToLine(lineId: string, p1Id: string, p2Id: string) {
+  const st = useSketchStore.getState();
+  const p1 = st.points.find((p) => p.id === p1Id);
+  const p2 = st.points.find((p) => p.id === p2Id);
+  if (!p1 || !p2) return;
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1e-10) return;
+  const angTol = 1e-9;
+  const horiz = Math.abs(dy) / len < angTol;
+  const vert = Math.abs(dx) / len < angTol;
+  if (horiz === vert) return;
+  st.clearSelection();
+  st.toggleSelect({ type: 'line', id: lineId }, false);
+  st.applyConstraint(horiz ? 'horizontal' : 'vertical', { skipHistory: true });
+  st.clearSelection();
+}
 
 interface Loop2D {
   id: string;
@@ -378,6 +432,24 @@ export const Sketcher2D: React.FC = () => {
     [zoom, findNearestPoint]
   );
 
+  /** Grid + point snap, then ortho from line/polyline anchor when drawing a segment (preview + click). */
+  const snapWorldForLineDraw = useCallback(
+    (wx: number, wy: number) => {
+      const base = snapWorld(wx, wy);
+      const anchorLine =
+        activeCommand === 'line' && drawPts.length === 1 ? drawPts[0] : null;
+      const anchorPoly =
+        activeCommand === 'polyline' && drawPts.length >= 1 ? drawPts[drawPts.length - 1] : null;
+      const anchor = anchorLine ?? anchorPoly;
+      if (!anchor) return base;
+      if (base.snapped) return base;
+      const o = snapLineEndpointToAnchorOrtho(anchor.x, anchor.y, base.x, base.y, LINE_ANCHOR_ORTHO_SNAP_DEG);
+      if (o.mode === null) return base;
+      return { x: o.x, y: o.y, snapped: base.snapped };
+    },
+    [snapWorld, activeCommand, drawPts]
+  );
+
   const isDrawingTool = (cmd: string | null) =>
     cmd === 'line' ||
     cmd === 'polyline' ||
@@ -526,7 +598,11 @@ export const Sketcher2D: React.FC = () => {
       const sx = e.clientX - rect.left;
       const sy = e.clientY - rect.top;
       const world = screenToWorld(sx, sy);
-      const snap = snapWorld(world.x, world.y);
+      const snap =
+        (activeCommand === 'line' && drawPts.length >= 1) ||
+        (activeCommand === 'polyline' && drawPts.length >= 1)
+          ? snapWorldForLineDraw(world.x, world.y)
+          : snapWorld(world.x, world.y);
       const tryApplyPendingConstraint = () => {
         const pending = useSketchStore.getState().pendingConstraintType;
         if (!pending) return;
@@ -663,7 +739,8 @@ export const Sketcher2D: React.FC = () => {
           const d0 = drawPts[0];
           const startId = placeSketchPoint(d0.x, d0.y, d0.snapped);
           const endId = placeSketchPoint(snap.x, snap.y, snap.snapped);
-          addLine(startId, endId);
+          const lineId = addLine(startId, endId);
+          applyHorizontalOrVerticalConstraintToLine(lineId, startId, endId);
           setDrawPts([]);
         }
       } else if (activeCommand === 'polyline') {
@@ -674,7 +751,8 @@ export const Sketcher2D: React.FC = () => {
           const prev = drawPts[drawPts.length - 1];
           const prevId = placeSketchPoint(prev.x, prev.y, prev.snapped);
           const endId = placeSketchPoint(snap.x, snap.y, snap.snapped);
-          addLine(prevId, endId);
+          const lineId = addLine(prevId, endId);
+          applyHorizontalOrVerticalConstraintToLine(lineId, prevId, endId);
           setDrawPts([...drawPts, snap]);
         }
       } else if (activeCommand === 'circle') {
@@ -762,6 +840,7 @@ export const Sketcher2D: React.FC = () => {
       screenToWorld,
       worldToScreen,
       snapWorld,
+      snapWorldForLineDraw,
       addPoint,
       addLine,
       addCircle,
@@ -803,7 +882,11 @@ export const Sketcher2D: React.FC = () => {
       const sy = e.clientY - rect.top;
       const world = screenToWorld(sx, sy);
       setCursor(world);
-      const snap = snapWorld(world.x, world.y);
+      const snap =
+        (activeCommand === 'line' && drawPts.length >= 1) ||
+        (activeCommand === 'polyline' && drawPts.length >= 1)
+          ? snapWorldForLineDraw(world.x, world.y)
+          : snapWorld(world.x, world.y);
       setSnappedCursor(snap);
       setSnapIndicator(snap.snapped);
 
@@ -910,7 +993,7 @@ export const Sketcher2D: React.FC = () => {
         setHoveredEntity(entity);
       }
     },
-    [isPanning, screenToWorld, snapWorld, draggingDimension, updateConstraintParams, dragPoint, translateSketchPoints, setCircleRadius, boxSelect, collectBoxSelection, activeCommand, drawPts, zoom, findNearestEntity]
+    [isPanning, screenToWorld, snapWorld, snapWorldForLineDraw, draggingDimension, updateConstraintParams, dragPoint, translateSketchPoints, setCircleRadius, boxSelect, collectBoxSelection, activeCommand, drawPts, zoom, findNearestEntity]
   );
 
   const handlePointerUp = useCallback(

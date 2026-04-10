@@ -6,13 +6,13 @@ import {
   type SolverCircle,
   type SolverArc,
   type SolverConstraint,
-} from '../lib/constraintSolver';
-import { sampleArcPoints } from '../lib/sketchArcPoints';
+} from '@/core/constraintSolver';
+import { sampleArcPoints } from '@/core/sketchArcPoints';
 import {
   BSPLINE_DEFAULT_DEGREE,
   BSPLINE_HIT_SAMPLES_PER_SPAN,
   sampleOpenUniformBSpline,
-} from '../lib/sketchBspline';
+} from '@/core/sketchBspline';
 
 export const SKETCH_REF_ORIGIN_ID = '__ref_origin__';
 export const SKETCH_REF_X_AXIS_ID = '__ref_x_axis__';

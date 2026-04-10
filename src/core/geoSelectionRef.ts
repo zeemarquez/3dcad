@@ -1,4 +1,4 @@
-import type { GeometricSelectionRef } from '../store/useCadStore';
+import type { GeometricSelectionRef } from '@/modules/part/store/useCadStore';
 
 export function isPlaneRef(
   ref: GeometricSelectionRef | null,

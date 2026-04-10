@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useCadStore } from '../store/useCadStore';
+import { useCadStore } from '@/modules/part/store/useCadStore';
 import { GitCommit, History, ChevronUp, Check } from 'lucide-react';
 
 export const VersionControl = () => {

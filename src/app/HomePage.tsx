@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react';
-import type { RecentDocumentEntry } from '../lib/documentStore';
-import { loadPartDocument } from '../lib/documentStore';
-import { initCAD, buildAllSolids, type SolidMeshData } from '../lib/cadEngine';
-import { featuresToCadFeatureInputs } from '../lib/cadFeatureInputs';
-import { PartThumbnailCanvas } from './PartThumbnailCanvas';
+import type { RecentDocumentEntry } from './documentStore';
+import { loadPartDocument } from './documentStore';
+import { initCAD, buildAllSolids, type SolidMeshData } from '@/modules/part/kernel/cadEngine';
+import { featuresToCadFeatureInputs } from '@/modules/part/kernel/cadFeatureInputs';
+import { PartThumbnailCanvas } from '@/modules/part/components/PartThumbnailCanvas';
 
 interface HomePageProps {
   recents: RecentDocumentEntry[];

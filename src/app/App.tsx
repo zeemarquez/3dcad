@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { FeatureTree } from './components/FeatureTree';
-import { PropertyManager } from './components/PropertyManager';
-import { Viewport3D } from './components/Viewport3D';
-import { Sketcher2D } from './components/Sketcher2D';
-import { TopBar } from './components/TopBar';
-import { ParametersDialog } from './components/ParametersDialog';
-import { HomePage } from './components/HomePage';
+import { FeatureTree } from '@/modules/part/components/FeatureTree';
+import { PropertyManager } from '@/modules/part/components/PropertyManager';
+import { Viewport3D } from '@/modules/part/components/Viewport3D';
+import { Sketcher2D } from '@/modules/part/sketch/Sketcher2D';
+import { TopBar } from '@/modules/part/toolbar/TopBar';
+import { ParametersDialog } from '@/modules/part/components/ParametersDialog';
+import { HomePage } from './HomePage';
 import {
   createPartDocumentMeta,
   getLastOpenedDocumentId,
@@ -14,10 +14,12 @@ import {
   savePartDocument,
   setLastOpenedDocumentId,
   type RecentDocumentEntry,
-} from './lib/documentStore';
-import { useCadStore, type MeshData, type PartDocumentMeta } from './store/useCadStore';
+} from './documentStore';
+import { useCadStore, type MeshData, type PartDocumentMeta } from '@/modules/part/store/useCadStore';
 
 function sanitizeName(name: string): string {
+  // Strip Windows-invalid filename characters (incl. control chars)
+  // eslint-disable-next-line no-control-regex -- intentional \u0000-\u001F class
   return name.trim().replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').replace(/\s+/g, ' ') || 'Untitled Part';
 }
 
@@ -192,6 +194,7 @@ function App() {
   };
 
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect -- one-time mount: refresh recents and restore last-opened doc */
     if (initializedRef.current) return;
     initializedRef.current = true;
     refreshRecents();
@@ -202,6 +205,7 @@ function App() {
     importPartDocumentData(lastDoc);
     setActiveDocMeta(lastDoc.meta);
     setView('editor');
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [importPartDocumentData]);
 
   useEffect(() => {

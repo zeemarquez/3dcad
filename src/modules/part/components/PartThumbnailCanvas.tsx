@@ -2,7 +2,7 @@ import { useEffect, useMemo } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { Bounds, OrthographicCamera } from '@react-three/drei';
 import * as THREE from 'three';
-import type { SolidMeshData } from '../lib/cadEngine';
+import type { SolidMeshData } from '@/modules/part/kernel/cadEngine';
 
 /** Same direction as Viewport3D "Iso" preset (scaled unit vector along X=Y=Z). */
 const ISO_CAMERA_POS: [number, number, number] = [28, 28, 28];

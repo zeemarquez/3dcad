@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, Plus } from 'lucide-react';
-import { useCadStore } from '../store/useCadStore';
+import { useCadStore } from '@/modules/part/store/useCadStore';
 
 const tableHeaderCls = 'px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-600 border-b border-zinc-300 bg-zinc-100';
 const cellCls = 'px-2 py-1.5 border-b border-zinc-200 align-top';
