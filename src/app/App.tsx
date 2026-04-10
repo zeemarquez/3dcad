@@ -5,22 +5,31 @@ import { Viewport3D } from '@/modules/part/components/Viewport3D';
 import { Sketcher2D } from '@/modules/part/sketch/Sketcher2D';
 import { TopBar } from '@/modules/part/toolbar/TopBar';
 import { ParametersDialog } from '@/modules/part/components/ParametersDialog';
+import { DrawingEditor } from '@/modules/drawing/components/DrawingEditor';
 import { HomePage } from './HomePage';
 import {
+  createDrawingDocumentMeta,
   createPartDocumentMeta,
   getLastOpenedDocumentId,
   listRecentDocuments,
+  loadDrawingDocument,
   loadPartDocument,
+  saveDrawingDocument,
   savePartDocument,
   setLastOpenedDocumentId,
   type RecentDocumentEntry,
 } from './documentStore';
 import { useCadStore, type MeshData, type PartDocumentMeta } from '@/modules/part/store/useCadStore';
+import { useDrawingStore, type DrawingDocumentMeta } from '@/modules/drawing/store/useDrawingStore';
 
 function sanitizeName(name: string): string {
-  // Strip Windows-invalid filename characters (incl. control chars)
   // eslint-disable-next-line no-control-regex -- intentional \u0000-\u001F class
   return name.trim().replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').replace(/\s+/g, ' ') || 'Untitled Part';
+}
+
+function sanitizeDrawingName(name: string): string {
+  // eslint-disable-next-line no-control-regex
+  return name.trim().replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').replace(/\s+/g, ' ') || 'Untitled Drawing';
 }
 
 function downloadBlob(content: BlobPart, fileName: string, mimeType: string): void {
@@ -62,9 +71,10 @@ function meshToAsciiStl(meshes: MeshData[], solidName: string): string {
 }
 
 function App() {
-  const [view, setView] = useState<'home' | 'editor'>('home');
+  const [view, setView] = useState<'home' | 'part' | 'drawing'>('home');
   const [recents, setRecents] = useState<RecentDocumentEntry[]>([]);
-  const [activeDocMeta, setActiveDocMeta] = useState<PartDocumentMeta | null>(null);
+  const [activePartMeta, setActivePartMeta] = useState<PartDocumentMeta | null>(null);
+  const [activeDrawingMeta, setActiveDrawingMeta] = useState<DrawingDocumentMeta | null>(null);
   const initializedRef = useRef(false);
 
   const features = useCadStore((s) => s.features);
@@ -75,25 +85,53 @@ function App() {
   const resetDocument = useCadStore((s) => s.resetDocument);
   const meshes = useCadStore((s) => s.meshes);
 
+  const exportDrawingDocumentData = useDrawingStore((s) => s.exportDrawingDocumentData);
+  const importDrawingDocumentData = useDrawingStore((s) => s.importDrawingDocumentData);
+  const resetDrawing = useDrawingStore((s) => s.resetDrawing);
+  const drawingLinkedPartId = useDrawingStore((s) => s.linkedPartId);
+  const drawingViews = useDrawingStore((s) => s.views);
+  const drawingSheet = useDrawingStore((s) => s.sheet);
+
   const editorSnapshot = useMemo(
     () => ({ features, userParameters, dimensionParameters }),
-    [features, userParameters, dimensionParameters]
+    [features, userParameters, dimensionParameters],
+  );
+
+  const drawingSnapshot = useMemo(
+    () => ({ linkedPartId: drawingLinkedPartId, views: drawingViews, sheet: drawingSheet }),
+    [drawingLinkedPartId, drawingViews, drawingSheet],
   );
 
   const refreshRecents = () => setRecents(listRecentDocuments());
 
-  const persistDocument = (
+  const persistPartDocument = (
     meta: PartDocumentMeta,
-    opts?: { touchTimestamp?: boolean; updateUiState?: boolean }
+    opts?: { touchTimestamp?: boolean; updateUiState?: boolean },
   ) => {
     const touchTimestamp = opts?.touchTimestamp ?? true;
     const updateUiState = opts?.updateUiState ?? true;
     const nextMeta = touchTimestamp ? { ...meta, updatedAt: Date.now() } : meta;
     const payload = exportPartDocumentData(nextMeta);
     savePartDocument(payload);
-    setLastOpenedDocumentId(nextMeta.id);
+    setLastOpenedDocumentId(nextMeta.id, 'part');
     if (updateUiState) {
-      setActiveDocMeta(nextMeta);
+      setActivePartMeta(nextMeta);
+      refreshRecents();
+    }
+  };
+
+  const persistDrawingDocument = (
+    meta: DrawingDocumentMeta,
+    opts?: { touchTimestamp?: boolean; updateUiState?: boolean },
+  ) => {
+    const touchTimestamp = opts?.touchTimestamp ?? true;
+    const updateUiState = opts?.updateUiState ?? true;
+    const nextMeta = touchTimestamp ? { ...meta, updatedAt: Date.now() } : meta;
+    const payload = exportDrawingDocumentData(nextMeta);
+    saveDrawingDocument(payload);
+    setLastOpenedDocumentId(nextMeta.id, 'drawing');
+    if (updateUiState) {
+      setActiveDrawingMeta(nextMeta);
       refreshRecents();
     }
   };
@@ -103,94 +141,161 @@ function App() {
     resetDocument();
     const payload = exportPartDocumentData(meta);
     savePartDocument(payload);
-    setLastOpenedDocumentId(meta.id);
-    setActiveDocMeta(meta);
+    setLastOpenedDocumentId(meta.id, 'part');
+    setActivePartMeta(meta);
+    setActiveDrawingMeta(null);
     refreshRecents();
-    setView('editor');
+    setView('part');
   };
 
-  const handleOpenDocument = (id: string) => {
+  const handleCreateDrawing = () => {
+    resetDrawing();
+    const meta = createDrawingDocumentMeta();
+    const payload = exportDrawingDocumentData(meta);
+    saveDrawingDocument(payload);
+    setLastOpenedDocumentId(meta.id, 'drawing');
+    setActiveDrawingMeta(meta);
+    setActivePartMeta(null);
+    refreshRecents();
+    setView('drawing');
+  };
+
+  const handleOpenDocument = (id: string, type: 'part' | 'drawing') => {
+    if (type === 'drawing') {
+      const doc = loadDrawingDocument(id);
+      if (!doc) return;
+      importDrawingDocumentData(doc);
+      setActiveDrawingMeta(doc.meta);
+      setActivePartMeta(null);
+      setLastOpenedDocumentId(doc.meta.id, 'drawing');
+      refreshRecents();
+      setView('drawing');
+      return;
+    }
     const doc = loadPartDocument(id);
     if (!doc) return;
     importPartDocumentData(doc);
-    setActiveDocMeta(doc.meta);
-    setLastOpenedDocumentId(doc.meta.id);
+    setActivePartMeta(doc.meta);
+    setActiveDrawingMeta(null);
+    setLastOpenedDocumentId(doc.meta.id, 'part');
     refreshRecents();
-    setView('editor');
+    setView('part');
   };
 
   const handleGoHome = () => {
-    if (activeDocMeta) {
-      persistDocument(activeDocMeta);
+    if (view === 'part' && activePartMeta) {
+      persistPartDocument(activePartMeta);
+    }
+    if (view === 'drawing' && activeDrawingMeta) {
+      persistDrawingDocument(activeDrawingMeta);
     }
     setView('home');
     refreshRecents();
   };
 
-  const handleRenameDocument = () => {
-    if (!activeDocMeta) return;
-    const next = window.prompt('Rename document', activeDocMeta.name);
+  const handleRenamePart = () => {
+    if (!activePartMeta) return;
+    const next = window.prompt('Rename document', activePartMeta.name);
     if (!next) return;
     const nextName = sanitizeName(next);
-    const nextMeta = { ...activeDocMeta, name: nextName };
-    persistDocument(nextMeta);
+    const nextMeta = { ...activePartMeta, name: nextName };
+    persistPartDocument(nextMeta);
   };
 
-  const handleSaveAs = () => {
-    if (!activeDocMeta) return;
-    const next = window.prompt('Save As name', `${activeDocMeta.name} Copy`);
+  const handleSaveAsPart = () => {
+    if (!activePartMeta) return;
+    const next = window.prompt('Save As name', `${activePartMeta.name} Copy`);
     if (!next) return;
     const nextName = sanitizeName(next);
     const meta = createPartDocumentMeta(nextName);
     const payload = exportPartDocumentData(meta);
     savePartDocument(payload);
-    setLastOpenedDocumentId(meta.id);
-    setActiveDocMeta(meta);
+    setLastOpenedDocumentId(meta.id, 'part');
+    setActivePartMeta(meta);
     refreshRecents();
   };
 
-  const handleCreateCopy = () => {
-    if (!activeDocMeta) return;
-    const meta = createPartDocumentMeta(`${activeDocMeta.name} Copy`);
+  const handleCreateCopyPart = () => {
+    if (!activePartMeta) return;
+    const meta = createPartDocumentMeta(`${activePartMeta.name} Copy`);
     const payload = exportPartDocumentData(meta);
     savePartDocument(payload);
-    setLastOpenedDocumentId(meta.id);
-    setActiveDocMeta(meta);
+    setLastOpenedDocumentId(meta.id, 'part');
+    setActivePartMeta(meta);
     refreshRecents();
   };
 
   const handleDownloadPar = () => {
-    if (!activeDocMeta) return;
-    const payload = exportPartDocumentData(activeDocMeta);
-    const fileName = `${sanitizeName(activeDocMeta.name)}.par`;
+    if (!activePartMeta) return;
+    const payload = exportPartDocumentData(activePartMeta);
+    const fileName = `${sanitizeName(activePartMeta.name)}.par`;
+    downloadBlob(JSON.stringify(payload, null, 2), fileName, 'application/json');
+  };
+
+  const handleRenameDrawing = () => {
+    if (!activeDrawingMeta) return;
+    const next = window.prompt('Rename document', activeDrawingMeta.name);
+    if (!next) return;
+    const nextName = sanitizeDrawingName(next);
+    const nextMeta = { ...activeDrawingMeta, name: nextName };
+    persistDrawingDocument(nextMeta);
+  };
+
+  const handleSaveAsDrawing = () => {
+    if (!activeDrawingMeta) return;
+    const next = window.prompt('Save As name', `${activeDrawingMeta.name} Copy`);
+    if (!next) return;
+    const nextName = sanitizeDrawingName(next);
+    const meta = createDrawingDocumentMeta(nextName);
+    const payload = exportDrawingDocumentData(meta);
+    saveDrawingDocument(payload);
+    setLastOpenedDocumentId(meta.id, 'drawing');
+    setActiveDrawingMeta(meta);
+    refreshRecents();
+  };
+
+  const handleCreateCopyDrawing = () => {
+    if (!activeDrawingMeta) return;
+    const meta = createDrawingDocumentMeta(`${activeDrawingMeta.name} Copy`);
+    const payload = exportDrawingDocumentData(meta);
+    saveDrawingDocument(payload);
+    setLastOpenedDocumentId(meta.id, 'drawing');
+    setActiveDrawingMeta(meta);
+    refreshRecents();
+  };
+
+  const handleDownloadDrw = () => {
+    if (!activeDrawingMeta) return;
+    const payload = exportDrawingDocumentData(activeDrawingMeta);
+    const fileName = `${sanitizeDrawingName(activeDrawingMeta.name)}.drw`;
     downloadBlob(JSON.stringify(payload, null, 2), fileName, 'application/json');
   };
 
   const handleExportStl = () => {
-    if (!activeDocMeta) return;
+    if (!activePartMeta) return;
     if (!meshes.length) {
       window.alert('No geometry to export.');
       return;
     }
-    const stl = meshToAsciiStl(meshes, sanitizeName(activeDocMeta.name));
-    downloadBlob(stl, `${sanitizeName(activeDocMeta.name)}.stl`, 'model/stl');
+    const stl = meshToAsciiStl(meshes, sanitizeName(activePartMeta.name));
+    downloadBlob(stl, `${sanitizeName(activePartMeta.name)}.stl`, 'model/stl');
   };
 
   const handleExportStep = () => {
-    if (!activeDocMeta) return;
-    const payload = exportPartDocumentData(activeDocMeta);
+    if (!activePartMeta) return;
+    const payload = exportPartDocumentData(activePartMeta);
     const content = [
       'ISO-10303-21;',
       'HEADER;',
       `FILE_DESCRIPTION(('ModernCAD placeholder STEP export'),'2;1');`,
-      `FILE_NAME('${sanitizeName(activeDocMeta.name)}.step','${new Date().toISOString()}',('ModernCAD'),('ModernCAD'),'','', '');`,
+      `FILE_NAME('${sanitizeName(activePartMeta.name)}.step','${new Date().toISOString()}',('ModernCAD'),('ModernCAD'),'','', '');`,
       'ENDSEC;',
       'DATA;',
       `/* STEP kernel export pending. Embedded .par payload follows.\n${JSON.stringify(payload)}\n*/`,
       'ENDSEC;',
       'END-ISO-10303-21;',
     ].join('\n');
-    downloadBlob(content, `${sanitizeName(activeDocMeta.name)}.step`, 'application/step');
+    downloadBlob(content, `${sanitizeName(activePartMeta.name)}.step`, 'application/step');
   };
 
   useEffect(() => {
@@ -198,27 +303,45 @@ function App() {
     if (initializedRef.current) return;
     initializedRef.current = true;
     refreshRecents();
-    const lastOpenedId = getLastOpenedDocumentId();
-    if (!lastOpenedId) return;
-    const lastDoc = loadPartDocument(lastOpenedId);
+    const lastOpened = getLastOpenedDocumentId();
+    if (!lastOpened) return;
+    if (lastOpened.kind === 'drawing') {
+      const d = loadDrawingDocument(lastOpened.id);
+      if (!d) return;
+      importDrawingDocumentData(d);
+      setActiveDrawingMeta(d.meta);
+      setActivePartMeta(null);
+      setView('drawing');
+      return;
+    }
+    const lastDoc = loadPartDocument(lastOpened.id);
     if (!lastDoc) return;
     importPartDocumentData(lastDoc);
-    setActiveDocMeta(lastDoc.meta);
-    setView('editor');
+    setActivePartMeta(lastDoc.meta);
+    setActiveDrawingMeta(null);
+    setView('part');
     /* eslint-enable react-hooks/set-state-in-effect */
-  }, [importPartDocumentData]);
+  }, [importPartDocumentData, importDrawingDocumentData]);
 
   useEffect(() => {
-    if (view !== 'editor' || !activeDocMeta) return;
+    if (view !== 'part' || !activePartMeta) return;
     const timer = window.setTimeout(() => {
-      persistDocument(activeDocMeta);
+      persistPartDocument(activePartMeta);
     }, 1200);
     return () => window.clearTimeout(timer);
-  }, [view, activeDocMeta, editorSnapshot]);
+  }, [view, activePartMeta, editorSnapshot]);
 
   useEffect(() => {
-    if (view !== 'editor' || !activeDocMeta) return;
-    const flush = () => persistDocument(activeDocMeta, { touchTimestamp: true, updateUiState: false });
+    if (view !== 'drawing' || !activeDrawingMeta) return;
+    const timer = window.setTimeout(() => {
+      persistDrawingDocument(activeDrawingMeta);
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [view, activeDrawingMeta, drawingSnapshot]);
+
+  useEffect(() => {
+    if (view !== 'part' || !activePartMeta) return;
+    const flush = () => persistPartDocument(activePartMeta, { touchTimestamp: true, updateUiState: false });
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') flush();
     };
@@ -228,22 +351,58 @@ function App() {
       window.removeEventListener('beforeunload', flush);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [view, activeDocMeta, editorSnapshot]);
+  }, [view, activePartMeta, editorSnapshot]);
+
+  useEffect(() => {
+    if (view !== 'drawing' || !activeDrawingMeta) return;
+    const flush = () =>
+      persistDrawingDocument(activeDrawingMeta, { touchTimestamp: true, updateUiState: false });
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('beforeunload', flush);
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [view, activeDrawingMeta, drawingSnapshot]);
 
   if (view === 'home') {
-    return <HomePage recents={recents} onCreatePart={handleCreatePart} onOpenDocument={handleOpenDocument} />;
+    return (
+      <HomePage
+        recents={recents}
+        onCreatePart={handleCreatePart}
+        onCreateDrawing={handleCreateDrawing}
+        onOpenDocument={handleOpenDocument}
+      />
+    );
+  }
+
+  if (view === 'drawing') {
+    return (
+      <DrawingEditor
+        onHome={handleGoHome}
+        fileActions={{
+          onRenameDocument: handleRenameDrawing,
+          onSaveAs: handleSaveAsDrawing,
+          onDownloadDrw: handleDownloadDrw,
+          onCreateCopy: handleCreateCopyDrawing,
+        }}
+      />
+    );
   }
 
   return (
     <div className="flex flex-col h-screen w-screen overflow-hidden bg-zinc-100 text-zinc-900 font-sans">
       <TopBar
         onHomeClick={handleGoHome}
-        documentName={activeDocMeta?.name}
+        documentName={activePartMeta?.name}
         fileActions={{
-          onRenameDocument: handleRenameDocument,
-          onSaveAs: handleSaveAs,
+          onRenameDocument: handleRenamePart,
+          onSaveAs: handleSaveAsPart,
           onDownloadPar: handleDownloadPar,
-          onCreateCopy: handleCreateCopy,
+          onCreateCopy: handleCreateCopyPart,
           onExportStep: handleExportStep,
           onExportStl: handleExportStl,
         }}
