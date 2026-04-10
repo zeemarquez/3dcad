@@ -39,7 +39,7 @@ export function DrawingTools({
         label="H dim"
         variant="dimension"
         active={drawingDimensionMode === 'horizontal'}
-        title="Horizontal dimension — click a horizontal edge in a view"
+        title="Horizontal dimension — click a horizontal edge; or two vertices; or Shift+click a vertical edge then a second parallel vertical edge"
         onClick={() =>
           setDrawingDimensionMode(drawingDimensionMode === 'horizontal' ? null : 'horizontal')
         }
@@ -49,7 +49,7 @@ export function DrawingTools({
         label="V dim"
         variant="dimension"
         active={drawingDimensionMode === 'vertical'}
-        title="Vertical dimension — click a vertical edge in a view"
+        title="Vertical dimension — click a vertical edge; or two vertices; or Shift+click a horizontal edge then a second parallel horizontal edge"
         onClick={() =>
           setDrawingDimensionMode(drawingDimensionMode === 'vertical' ? null : 'vertical')
         }

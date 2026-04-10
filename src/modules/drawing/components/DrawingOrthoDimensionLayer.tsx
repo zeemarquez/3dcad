@@ -6,19 +6,29 @@ import type { SolidMeshData } from '@/modules/part/kernel/cadEngine';
 import { useDrawingStore } from '../store/useDrawingStore';
 import type { DrawingDimensionMode, DrawingSheetDimension } from '../store/useDrawingStore';
 import {
+  areParallelStraightInView,
+  endpointsHorizontalDimBetweenVerticalEdges,
+  endpointsVerticalDimBetweenHorizontalEdges,
   isHorizontalInView,
   isVerticalInView,
   projectedSpanMm,
+  validHorizontalDimParallelEdgePair,
+  validVerticalDimParallelEdgePair,
 } from '../drawingDimensionMath';
 
 const HOVER_PX = 10;
+const HOVER_VERTEX_PX = 12;
 const DIM_BLACK = '#0a0a0a';
 const DIM_ORANGE = '#ea580c';
 const EXT_ALPHA = 0.85;
-/** World-space mm; kept modest so labels stay readable without dominating the view. */
-const ARROW_LEN = 1.05;
-const ARROW_W = 0.38;
-const TEXT_SCALE = 0.95;
+/** World-space mm; arrows scale down on short dimensions (see `effectiveArrowSizeMm`). */
+const ARROW_LEN = 0.72;
+const ARROW_W = 0.26;
+const MIN_ARROW_MM = 0.12;
+const TEXT_SCALE = 0.68;
+/** Vertex pick markers (world mm radius). */
+const VERTEX_MARKER_R = 0.38;
+const VERTEX_HOVER_R = 0.22;
 /** Approximate half-width of dimension text along the dimension line (mm, world). */
 const TEXT_HALF_ALONG_MM = TEXT_SCALE * 2.4;
 /**
@@ -47,6 +57,28 @@ export function buildWorldEdgeSegments(
     }
   }
   return out;
+}
+
+/** Unique world-space vertices from solid edge endpoints (for vertex-pick dimensions). */
+function buildWorldVertices(
+  solids: SolidMeshData[],
+  q: THREE.Quaternion,
+  offset: THREE.Vector3,
+): THREE.Vector3[] {
+  const map = new Map<string, THREE.Vector3>();
+  const t = new THREE.Vector3();
+  for (const s of solids) {
+    const ev = s.edgeVertices;
+    if (!ev || ev.length < 6) continue;
+    for (let i = 0; i < ev.length; i += 6) {
+      for (const k of [0, 3]) {
+        t.set(ev[i + k], ev[i + k + 1], ev[i + k + 2]).applyQuaternion(q).add(offset);
+        const key = `${t.x.toFixed(4)},${t.y.toFixed(4)},${t.z.toFixed(4)}`;
+        if (!map.has(key)) map.set(key, t.clone());
+      }
+    }
+  }
+  return [...map.values()];
 }
 
 function distToSeg2(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
@@ -125,6 +157,85 @@ function pickStraightEdgeIndexAt(
   return bestI;
 }
 
+function pickNearestVertexAt(
+  vertices: THREE.Vector3[],
+  cx: number,
+  cy: number,
+  camera: THREE.Camera,
+  w: number,
+  h: number,
+  maxPx: number,
+): { point: THREE.Vector3; dist: number } | null {
+  let best: { point: THREE.Vector3; dist: number } | null = null;
+  for (const p of vertices) {
+    const t = p.clone().project(camera);
+    const px = (t.x * 0.5 + 0.5) * w;
+    const py = (-t.y * 0.5 + 0.5) * h;
+    const d = Math.hypot(cx - px, cy - py);
+    if (d <= maxPx && (!best || d < best.dist)) best = { point: p, dist: d };
+  }
+  return best;
+}
+
+function findNearestStraightEdgeWithDist(
+  segments: { a: THREE.Vector3; b: THREE.Vector3 }[],
+  cx: number,
+  cy: number,
+  camera: THREE.Camera,
+  w: number,
+  h: number,
+  maxPx: number,
+  dimensionMode: 'horizontal' | 'vertical',
+): { index: number; dist: number } | null {
+  let best: { index: number; dist: number } | null = null;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const ok =
+      dimensionMode === 'horizontal' ? isHorizontalInView(seg.a, seg.b) : isVerticalInView(seg.a, seg.b);
+    if (!ok) continue;
+    const { ax, ay, bx, by } = projectSegmentToCanvas(seg.a, seg.b, camera, w, h);
+    const d = distToSeg2(cx, cy, ax, ay, bx, by);
+    if (d <= maxPx && (!best || d < best.dist)) best = { index: i, dist: d };
+  }
+  return best;
+}
+
+function findNearestParallelEdgeForPending(
+  segments: { a: THREE.Vector3; b: THREE.Vector3 }[],
+  cx: number,
+  cy: number,
+  camera: THREE.Camera,
+  w: number,
+  h: number,
+  maxPx: number,
+  refIndex: number,
+  dimensionMode: 'horizontal' | 'vertical',
+): { index: number; dist: number } | null {
+  const s0 = segments[refIndex];
+  if (!s0) return null;
+  let best: { index: number; dist: number } | null = null;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (!areParallelStraightInView(s0.a, s0.b, seg.a, seg.b)) continue;
+    if (
+      dimensionMode === 'horizontal' &&
+      !validHorizontalDimParallelEdgePair(s0.a, s0.b, seg.a, seg.b)
+    ) {
+      continue;
+    }
+    if (
+      dimensionMode === 'vertical' &&
+      !validVerticalDimParallelEdgePair(s0.a, s0.b, seg.a, seg.b)
+    ) {
+      continue;
+    }
+    const { ax, ay, bx, by } = projectSegmentToCanvas(seg.a, seg.b, camera, w, h);
+    const d = distToSeg2(cx, cy, ax, ay, bx, by);
+    if (d <= maxPx && (!best || d < best.dist)) best = { index: i, dist: d };
+  }
+  return best;
+}
+
 function distanceToDimensionPick(
   dim: DrawingSheetDimension,
   cx: number,
@@ -182,8 +293,12 @@ export function DrawingOrthoDimensionLayer({
   const selectedDimensionId = useDrawingStore((s) => s.selectedDimensionId);
 
   const segments = useMemo(() => buildWorldEdgeSegments(solids, q, offset), [solids, q, offset]);
+  const worldVertices = useMemo(() => buildWorldVertices(solids, q, offset), [solids, q, offset]);
   const [hoverEdgeIndex, setHoverEdgeIndex] = useState<number | null>(null);
   const hoverEdgeIndexRef = useRef<number | null>(null);
+  const [pendingVertex, setPendingVertex] = useState<{ x: number; y: number; z: number } | null>(null);
+  const [pendingEdgeIndex, setPendingEdgeIndex] = useState<number | null>(null);
+  const [hoverSnapVertex, setHoverSnapVertex] = useState<{ x: number; y: number; z: number } | null>(null);
 
   const dragRef = useRef<{
     id: string;
@@ -202,6 +317,26 @@ export function DrawingOrthoDimensionLayer({
     return hoverEdgeIndex != null && hoverEdgeIndex < segments.length ? segments[hoverEdgeIndex] : null;
   }, [segments, hoverEdgeIndex]);
 
+  const pendingFirstEdgeGeom = useMemo(() => {
+    if (pendingEdgeIndex == null || pendingEdgeIndex >= segments.length) return null;
+    const seg = segments[pendingEdgeIndex];
+    const g = new THREE.BufferGeometry();
+    g.setAttribute(
+      'position',
+      new THREE.BufferAttribute(
+        new Float32Array([seg.a.x, seg.a.y, seg.a.z, seg.b.x, seg.b.y, seg.b.z]),
+        3,
+      ),
+    );
+    return g;
+  }, [pendingEdgeIndex, segments]);
+
+  useEffect(() => {
+    setPendingVertex(null);
+    setPendingEdgeIndex(null);
+    setHoverSnapVertex(null);
+  }, [dimensionMode]);
+
   useEffect(() => {
     const el = gl.domElement;
 
@@ -218,30 +353,64 @@ export function DrawingOrthoDimensionLayer({
       if (dimUnder) {
         hoverEdgeIndexRef.current = null;
         setHoverEdgeIndex(null);
+        setHoverSnapVertex(null);
         return;
       }
 
       if (!dimensionMode) {
+        hoverEdgeIndexRef.current = null;
+        setHoverEdgeIndex(null);
+        setHoverSnapVertex(null);
         return;
       }
 
-      let bestI: number | null = null;
-      let bestD = HOVER_PX + 1;
+      const mode = dimensionMode;
 
-      for (let i = 0; i < segments.length; i++) {
-        const seg = segments[i];
-        const { ax, ay, bx, by } = projectSegmentToCanvas(seg.a, seg.b, camera, w, h);
-        const d = distToSeg2(cx, cy, ax, ay, bx, by);
-        if (d < bestD && d <= HOVER_PX) {
-          const ok =
-            dimensionMode === 'horizontal'
-              ? isHorizontalInView(seg.a, seg.b)
-              : isVerticalInView(seg.a, seg.b);
-          if (ok) {
-            bestD = d;
-            bestI = i;
-          }
+      let bestI: number | null = null;
+
+      if (pendingEdgeIndex != null) {
+        const ePar = findNearestParallelEdgeForPending(
+          segments,
+          cx,
+          cy,
+          camera,
+          w,
+          h,
+          HOVER_PX,
+          pendingEdgeIndex,
+          mode,
+        );
+        bestI = ePar?.index ?? null;
+        hoverEdgeIndexRef.current = bestI;
+        setHoverEdgeIndex((prev) => (prev === bestI ? prev : bestI));
+        setHoverSnapVertex(null);
+        return;
+      }
+
+      if (pendingVertex != null) {
+        const vHit = pickNearestVertexAt(worldVertices, cx, cy, camera, w, h, HOVER_VERTEX_PX);
+        if (vHit) {
+          setHoverSnapVertex({ x: vHit.point.x, y: vHit.point.y, z: vHit.point.z });
+        } else {
+          setHoverSnapVertex(null);
         }
+        hoverEdgeIndexRef.current = null;
+        setHoverEdgeIndex(null);
+        return;
+      }
+
+      const vNear = pickNearestVertexAt(worldVertices, cx, cy, camera, w, h, HOVER_VERTEX_PX);
+      const eNear = findNearestStraightEdgeWithDist(segments, cx, cy, camera, w, h, HOVER_PX, mode);
+      const preferVertex = vNear && (!eNear || vNear.dist <= eNear.dist);
+      if (preferVertex && vNear) {
+        bestI = null;
+        setHoverSnapVertex({ x: vNear.point.x, y: vNear.point.y, z: vNear.point.z });
+      } else if (eNear) {
+        bestI = eNear.index;
+        setHoverSnapVertex(null);
+      } else {
+        bestI = null;
+        setHoverSnapVertex(null);
       }
       hoverEdgeIndexRef.current = bestI;
       setHoverEdgeIndex((prev) => (prev === bestI ? prev : bestI));
@@ -251,6 +420,7 @@ export function DrawingOrthoDimensionLayer({
       setHoveredDimensionId(null);
       hoverEdgeIndexRef.current = null;
       setHoverEdgeIndex(null);
+      setHoverSnapVertex(null);
     };
 
     const onDown = (e: PointerEvent) => {
@@ -284,30 +454,130 @@ export function DrawingOrthoDimensionLayer({
       }
 
       if (dimensionMode) {
-        let hi = hoverEdgeIndexRef.current;
-        if (hi == null) {
-          hi = pickStraightEdgeIndexAt(segments, cx, cy, camera, w, h, dimensionMode);
-        }
-        if (hi == null) return;
-        const seg = segments[hi];
-        const span = projectedSpanMm(dimensionMode, seg.a, seg.b);
-        if (span < 1e-6) return;
+        const mode = dimensionMode;
         const ortho = camera as THREE.OrthographicCamera;
         const defaultOff = Math.min(14, (ortho.top - ortho.bottom) * 0.06);
-        onAddDimension({
-          viewId,
-          kind: dimensionMode,
-          ax: seg.a.x,
-          ay: seg.a.y,
-          az: seg.a.z,
-          bx: seg.b.x,
-          by: seg.b.y,
-          bz: seg.b.z,
-          offsetMm: defaultOff,
-          alongMm: 0,
-        });
-        e.stopPropagation();
-        e.preventDefault();
+
+        const vNear = pickNearestVertexAt(worldVertices, cx, cy, camera, w, h, HOVER_VERTEX_PX);
+        const eNear = findNearestStraightEdgeWithDist(segments, cx, cy, camera, w, h, HOVER_PX, mode);
+        const preferVertex = vNear && (!eNear || vNear.dist <= eNear.dist);
+
+        const addDim = (ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
+          onAddDimension({
+            viewId,
+            kind: mode,
+            ax,
+            ay,
+            az,
+            bx,
+            by,
+            bz,
+            offsetMm: defaultOff,
+            alongMm: 0,
+          });
+        };
+
+        if (pendingVertex != null) {
+          if (vNear) {
+            const a = new THREE.Vector3(pendingVertex.x, pendingVertex.y, pendingVertex.z);
+            const b = vNear.point;
+            const span = projectedSpanMm(mode, a, b);
+            if (span < 1e-9) {
+              setPendingVertex(null);
+              e.stopPropagation();
+              e.preventDefault();
+              return;
+            }
+            addDim(a.x, a.y, a.z, b.x, b.y, b.z);
+            setPendingVertex(null);
+            e.stopPropagation();
+            e.preventDefault();
+            return;
+          }
+          setPendingVertex(null);
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
+
+        if (pendingEdgeIndex != null) {
+          const ePar = findNearestParallelEdgeForPending(
+            segments,
+            cx,
+            cy,
+            camera,
+            w,
+            h,
+            HOVER_PX,
+            pendingEdgeIndex,
+            mode,
+          );
+          if (!ePar) {
+            setPendingEdgeIndex(null);
+            e.stopPropagation();
+            e.preventDefault();
+            return;
+          }
+          const i0 = pendingEdgeIndex;
+          const i1 = ePar.index;
+          const s0 = segments[i0];
+          const s1 = segments[i1];
+          if (i0 === i1) {
+            const span = projectedSpanMm(mode, s0.a, s0.b);
+            if (span < 1e-6) {
+              setPendingEdgeIndex(null);
+              e.stopPropagation();
+              e.preventDefault();
+              return;
+            }
+            addDim(s0.a.x, s0.a.y, s0.a.z, s0.b.x, s0.b.y, s0.b.z);
+            setPendingEdgeIndex(null);
+            e.stopPropagation();
+            e.preventDefault();
+            return;
+          }
+          let a: THREE.Vector3;
+          let b: THREE.Vector3;
+          if (mode === 'horizontal') {
+            ({ a, b } = endpointsHorizontalDimBetweenVerticalEdges(s0.a, s0.b, s1.a, s1.b));
+          } else {
+            ({ a, b } = endpointsVerticalDimBetweenHorizontalEdges(s0.a, s0.b, s1.a, s1.b));
+          }
+          const span = projectedSpanMm(mode, a, b);
+          if (span < 1e-9) {
+            setPendingEdgeIndex(null);
+            e.stopPropagation();
+            e.preventDefault();
+            return;
+          }
+          addDim(a.x, a.y, a.z, b.x, b.y, b.z);
+          setPendingEdgeIndex(null);
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
+
+        if (e.shiftKey && !preferVertex && eNear) {
+          setPendingEdgeIndex(eNear.index);
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
+        if (preferVertex && vNear) {
+          setPendingVertex({ x: vNear.point.x, y: vNear.point.y, z: vNear.point.z });
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
+        if (eNear) {
+          const seg = segments[eNear.index];
+          const span = projectedSpanMm(mode, seg.a, seg.b);
+          if (span < 1e-6) return;
+          addDim(seg.a.x, seg.a.y, seg.a.z, seg.b.x, seg.b.y, seg.b.z);
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
         return;
       }
 
@@ -390,10 +660,13 @@ export function DrawingOrthoDimensionLayer({
     onAddDimension,
     onUpdateDimensionGeometry,
     onDimensionContextMenu,
+    pendingEdgeIndex,
+    pendingVertex,
     segments,
     setHoveredDimensionId,
     setSelectedDimensionId,
     viewId,
+    worldVertices,
   ]);
 
   const hoverGeom = useMemo(() => {
@@ -416,10 +689,43 @@ export function DrawingOrthoDimensionLayer({
     [hoverGeom],
   );
 
+  useEffect(
+    () => () => {
+      pendingFirstEdgeGeom?.dispose();
+    },
+    [pendingFirstEdgeGeom],
+  );
+
   const hoveredDimensionId = useDrawingStore((s) => s.hoveredDimensionId);
+
+  const snapSameAsPending =
+    pendingVertex &&
+    hoverSnapVertex &&
+    Math.hypot(
+      pendingVertex.x - hoverSnapVertex.x,
+      pendingVertex.y - hoverSnapVertex.y,
+      pendingVertex.z - hoverSnapVertex.z,
+    ) < 1e-4;
 
   return (
     <>
+      {pendingFirstEdgeGeom && dimensionMode && (
+        <lineSegments geometry={pendingFirstEdgeGeom} renderOrder={8}>
+          <lineBasicMaterial color="#2563eb" depthTest={false} depthWrite={false} />
+        </lineSegments>
+      )}
+      {pendingVertex && dimensionMode && (
+        <mesh position={[pendingVertex.x, pendingVertex.y, pendingVertex.z + 0.2]} renderOrder={10}>
+          <sphereGeometry args={[VERTEX_MARKER_R, 12, 12]} />
+          <meshBasicMaterial color={DIM_ORANGE} depthTest={false} depthWrite={false} />
+        </mesh>
+      )}
+      {hoverSnapVertex && dimensionMode && !snapSameAsPending && (
+        <mesh position={[hoverSnapVertex.x, hoverSnapVertex.y, hoverSnapVertex.z + 0.21]} renderOrder={11}>
+          <sphereGeometry args={[VERTEX_HOVER_R, 10, 10]} />
+          <meshBasicMaterial color="#fbbf24" depthTest={false} depthWrite={false} />
+        </mesh>
+      )}
       {hoverGeom && dimensionMode && (
         <lineSegments geometry={hoverGeom} renderOrder={9}>
           <lineBasicMaterial color={DIM_ORANGE} depthTest={false} depthWrite={false} />
@@ -596,12 +902,13 @@ function IsoDimensionLines({
   const dirN = useMemo(() => (len < 1e-9 ? null : dir.clone().normalize()), [dir, len]);
 
   const arrowGeoms = useMemo(() => {
-    if (!dirN || len < ARROW_LEN * 4) return null;
+    if (!dirN || len < 1e-9) return null;
+    const { alen, aw } = effectiveArrowSizeMm(len);
     const s1 = pts.invertArrows ? -1 : 1;
     const s2 = pts.invertArrows ? 1 : -1;
     return {
-      g1: arrowHeadGeometry(pts.dima, dirN, s1),
-      g2: arrowHeadGeometry(pts.dimb, dirN, s2),
+      g1: arrowHeadGeometry(pts.dima, dirN, s1, alen, aw),
+      g2: arrowHeadGeometry(pts.dimb, dirN, s2, alen, aw),
     };
   }, [pts, dirN, len]);
 
@@ -660,12 +967,25 @@ function IsoDimensionLines({
   );
 }
 
-function arrowHeadGeometry(tip: THREE.Vector3, along: THREE.Vector3, sign: number): THREE.BufferGeometry {
+/** Scale arrow length/width so heads fit on short dimensions but stay visible (was hidden when len < 4×ARROW_LEN). */
+function effectiveArrowSizeMm(dimensionLineLenMm: number): { alen: number; aw: number } {
+  const alen = Math.max(MIN_ARROW_MM, Math.min(ARROW_LEN, dimensionLineLenMm * 0.38));
+  const aw = alen * (ARROW_W / ARROW_LEN);
+  return { alen, aw };
+}
+
+function arrowHeadGeometry(
+  tip: THREE.Vector3,
+  along: THREE.Vector3,
+  sign: number,
+  arrowLen: number,
+  arrowW: number,
+): THREE.BufferGeometry {
   const g = new THREE.BufferGeometry();
-  const back = new THREE.Vector3().copy(tip).addScaledVector(along, sign * ARROW_LEN);
+  const back = new THREE.Vector3().copy(tip).addScaledVector(along, sign * arrowLen);
   const side = new THREE.Vector3(-along.y, along.x, 0);
   if (side.lengthSq() < 1e-12) side.set(along.z, 0, -along.x);
-  side.normalize().multiplyScalar(ARROW_W * 0.55);
+  side.normalize().multiplyScalar(arrowW * 0.55);
   const p1 = new THREE.Vector3().copy(back).add(side);
   const p2 = new THREE.Vector3().copy(back).sub(side);
   const arr = new Float32Array([tip.x, tip.y, tip.z, p1.x, p1.y, p1.z, tip.x, tip.y, tip.z, p2.x, p2.y, p2.z]);
