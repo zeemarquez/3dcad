@@ -5,6 +5,7 @@ import { useDrawingStore, computePlacementForNewView } from '../store/useDrawing
 import { loadPartSolids } from '../loadPartSolids';
 import { DrawingTopBar, type DrawingFileToolbarActions } from './DrawingTopBar';
 import { DrawingSheet } from './DrawingSheet';
+import { DrawingViewPropertiesSidebar } from './DrawingViewPropertiesSidebar';
 import { LinkPartDialog } from './LinkPartDialog';
 import { PlaceViewDialog } from './PlaceViewDialog';
 
@@ -16,17 +17,24 @@ export function DrawingEditor({
   fileActions: DrawingFileToolbarActions;
 }) {
   const linkedPartId = useDrawingStore((s) => s.linkedPartId);
+  const views = useDrawingStore((s) => s.views);
   const sheet = useDrawingStore((s) => s.sheet);
   const addView = useDrawingStore((s) => s.addView);
 
   const [linkOpen, setLinkOpen] = useState(false);
   const [placeOpen, setPlaceOpen] = useState(false);
+  const [placeIsoOpen, setPlaceIsoOpen] = useState(false);
   const [solids, setSolids] = useState<SolidMeshData[] | null>(null);
   const [loadingSolids, setLoadingSolids] = useState(false);
 
   const parts = listPartDocuments();
 
   const linkedPartName = linkedPartId ? loadPartDocument(linkedPartId)?.meta.name : undefined;
+
+  useEffect(() => {
+    if (linkedPartId || views.length > 0) return;
+    setLinkOpen(true);
+  }, [linkedPartId, views.length]);
 
   useEffect(() => {
     if (!linkedPartId) {
@@ -57,13 +65,14 @@ export function DrawingEditor({
         fileActions={fileActions}
         linkedPartId={linkedPartId}
         linkedPartName={linkedPartName}
-        onSetLinkedPart={() => setLinkOpen(true)}
         onPlaceView={() => setPlaceOpen(true)}
+        onPlaceIsoView={() => setPlaceIsoOpen(true)}
       />
-      <div className="flex min-h-0 flex-1 overflow-visible">
-        <main className="relative flex-1 overflow-visible">
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <main className="relative min-h-0 flex-1 overflow-hidden">
           <DrawingSheet solids={solids} loadingSolids={loadingSolids} />
         </main>
+        <DrawingViewPropertiesSidebar />
       </div>
 
       <LinkPartDialog
@@ -103,6 +112,40 @@ export function DrawingEditor({
             viewScaleNum,
             viewScaleDen,
             alignment,
+          });
+        }}
+      />
+
+      <PlaceViewDialog
+        variant="isometric"
+        open={placeIsoOpen}
+        partId={linkedPartId}
+        maxViewWidthMm={sheet.widthMm - 24}
+        maxViewHeightMm={sheet.heightMm - 24}
+        onClose={() => setPlaceIsoOpen(false)}
+        onConfirm={(payload) => {
+          const { views } = useDrawingStore.getState();
+          const { sheetX, sheetY } = computePlacementForNewView(views);
+          const {
+            orientation,
+            widthMm,
+            heightMm,
+            viewPlaneExtentXMm,
+            viewPlaneExtentYMm,
+            viewScaleNum,
+            viewScaleDen,
+          } = payload;
+          addView({
+            orientation,
+            sheetX,
+            sheetY,
+            widthMm,
+            heightMm,
+            viewPlaneExtentXMm,
+            viewPlaneExtentYMm,
+            viewScaleNum,
+            viewScaleDen,
+            alignment: 'free',
           });
         }}
       />

@@ -19,6 +19,13 @@ function quatToTuple(q: THREE.Quaternion): [number, number, number, number] {
   return [q.x, q.y, q.z, q.w];
 }
 
+/** Classic isometric: 45° about Y then ~35.264° about X (camera +Z, model rotated into view). */
+function makeInitialIsometricQuaternion(): THREE.Quaternion {
+  const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 4);
+  const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.atan(1 / Math.sqrt(2)));
+  return new THREE.Quaternion().multiplyQuaternions(qx, qy);
+}
+
 const arrowBtn =
   'flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-zinc-300 bg-zinc-50 text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 disabled:hover:bg-zinc-50';
 
@@ -44,6 +51,7 @@ export type PlaceViewConfirmPayload = {
 
 export function PlaceViewDialog({
   open,
+  variant = 'standard',
   partId,
   maxViewWidthMm,
   maxViewHeightMm,
@@ -51,6 +59,8 @@ export function PlaceViewDialog({
   onConfirm,
 }: {
   open: boolean;
+  /** Isometric: initial three-quarter view; arrow axes swapped 90° vs standard ortho. */
+  variant?: 'standard' | 'isometric';
   partId: string | null;
   maxViewWidthMm: number;
   maxViewHeightMm: number;
@@ -66,8 +76,8 @@ export function PlaceViewDialog({
 
   useEffect(() => {
     if (!open) return;
-    setQ(new THREE.Quaternion());
-  }, [open, partId]);
+    setQ(variant === 'isometric' ? makeInitialIsometricQuaternion() : new THREE.Quaternion());
+  }, [open, partId, variant]);
 
   useEffect(() => {
     if (!open) return;
@@ -98,16 +108,27 @@ export function PlaceViewDialog({
     };
   }, [open, partId]);
 
-  const handleRotate = useCallback((dir: 'up' | 'down' | 'left' | 'right') => {
-    setQ((prev) => {
-      const n = prev.clone();
-      if (dir === 'up') rotateWorldAxis(n, 'x', 1);
-      else if (dir === 'down') rotateWorldAxis(n, 'x', -1);
-      else if (dir === 'left') rotateWorldAxis(n, 'y', -1);
-      else rotateWorldAxis(n, 'y', 1);
-      return n;
-    });
-  }, []);
+  const handleRotate = useCallback(
+    (dir: 'up' | 'down' | 'left' | 'right') => {
+      setQ((prev) => {
+        const n = prev.clone();
+        if (variant === 'isometric') {
+          // 90° vs standard: screen up/down ↔ world Y, left/right ↔ world X
+          if (dir === 'up') rotateWorldAxis(n, 'y', 1);
+          else if (dir === 'down') rotateWorldAxis(n, 'y', -1);
+          else if (dir === 'left') rotateWorldAxis(n, 'x', -1);
+          else rotateWorldAxis(n, 'x', 1);
+        } else {
+          if (dir === 'up') rotateWorldAxis(n, 'x', 1);
+          else if (dir === 'down') rotateWorldAxis(n, 'x', -1);
+          else if (dir === 'left') rotateWorldAxis(n, 'y', -1);
+          else rotateWorldAxis(n, 'y', 1);
+        }
+        return n;
+      });
+    },
+    [variant],
+  );
 
   const handleOk = useCallback(() => {
     if (!solids?.length) return;
@@ -149,7 +170,7 @@ export function PlaceViewDialog({
       >
         <div className="flex items-center justify-between border-b border-zinc-200 px-4 py-3">
           <h2 id="place-view-title" className="text-sm font-semibold text-zinc-900">
-            Place standard view
+            {variant === 'isometric' ? 'Place isometric view' : 'Place standard view'}
           </h2>
           <button
             type="button"
@@ -164,7 +185,7 @@ export function PlaceViewDialog({
         <div className="flex flex-col items-center px-4 py-6">
           {emptyPart && (
             <div className="flex h-[220px] w-full max-w-md items-center justify-center rounded-md border border-dashed border-zinc-300 bg-zinc-50 text-sm text-zinc-500">
-              Link a part first (Drawing → Set linked part).
+              A part must be linked when the drawing is created.
             </div>
           )}
           {!emptyPart && loading && (
@@ -267,8 +288,9 @@ export function PlaceViewDialog({
               </div>
 
               <p className="mt-2 max-w-md text-center text-[10px] leading-snug text-zinc-500">
-                Use the arrows to step orientation in 90° increments (up/down · X, left/right · Y). Orthographic preview,
-                line mode.
+                {variant === 'isometric'
+                  ? 'Arrows step 90° (up/down · Y, left/right · X). Isometric-style orthographic preview, line mode. View is free to position on the sheet.'
+                  : 'Use the arrows to step orientation in 90° increments (up/down · X, left/right · Y). Orthographic preview, line mode.'}
               </p>
             </div>
           )}

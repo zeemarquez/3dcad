@@ -36,10 +36,13 @@ function viewPlaneHalfExtentsMm(v: DrawingViewPlacement): { x: number; y: number
 
 const BASE_PX_PER_MM = 2.8;
 
-/** Scale gutter with view size so small views still get enough frustum margin; capped for huge views. */
+/**
+ * Extra CSS px around the letterboxed model area → widens the ortho frustum so linear dimensions
+ * can sit far outside the silhouette without WebGL clipping. Scales with view size.
+ */
 function viewCanvasGutterPx(innerW: number, innerH: number): number {
   const m = Math.min(innerW, innerH);
-  return Math.min(260, Math.max(96, Math.round(m * 0.36)));
+  return Math.max(220, Math.round(m * 0.62));
 }
 
 type DragState = {
@@ -128,6 +131,7 @@ function DrawingSheetViewBox({
   innerW,
   innerH,
   canvasGutterPx,
+  stackZIndex,
   selected,
   drawingDimensionMode,
   dimHoverThisView,
@@ -146,6 +150,8 @@ function DrawingSheetViewBox({
   innerW: number;
   innerH: number;
   canvasGutterPx: number;
+  /** Later DOM siblings paint on top; use this so principal / selected views receive hits when boxes overlap. */
+  stackZIndex: number;
   selected: boolean;
   drawingDimensionMode: DrawingDimensionMode;
   dimHoverThisView: boolean;
@@ -194,6 +200,7 @@ function DrawingSheetViewBox({
         bottom,
         width: wPx,
         height: hPx,
+        zIndex: stackZIndex,
         cursor,
       }}
       onPointerMoveCapture={syncChromeFromEvent}
@@ -321,6 +328,8 @@ export function DrawingSheet({ solids, loadingSolids }: { solids: SolidMeshData[
         store.updateView(d.viewId, { sheetX: primary.sheetX, sheetY: d.originSheetY + dyMm });
       } else if (al === 'horizontal') {
         store.updateView(d.viewId, { sheetX: d.originSheetX + dxMm, sheetY: primary.sheetY });
+      } else if (al === 'free') {
+        store.updateView(d.viewId, { sheetX: d.originSheetX + dxMm, sheetY: d.originSheetY + dyMm });
       }
     },
     [pxPerMm, movePrimaryOnSheet],
@@ -559,14 +568,6 @@ export function DrawingSheet({ solids, loadingSolids }: { solids: SolidMeshData[
             stroke="#27272a"
             strokeWidth={1.25}
           />
-          <text
-            x={marginMm * pxPerMm + 6}
-            y={marginMm * pxPerMm + 14}
-            className="fill-zinc-500"
-            style={{ fontSize: 10 }}
-          >
-            A4 landscape — {A4_WIDTH_MM} × {A4_HEIGHT_MM} mm
-          </text>
         </svg>
 
         {loadingSolids && linkedPartId && (
@@ -607,6 +608,10 @@ export function DrawingSheet({ solids, loadingSolids }: { solids: SolidMeshData[
 
           const canvasGutterPx = viewCanvasGutterPx(innerW, innerH);
 
+          /** Without z-index, later `views.map` siblings stack above earlier ones; tall views + dimension gutters often overlap the principal view and steal pointer events. */
+          const stackZIndex =
+            (views.length - 1 - viewIndex) * 10 + (selected ? 500 : 0);
+
           return (
             <DrawingSheetViewBox
               key={v.id}
@@ -621,6 +626,7 @@ export function DrawingSheet({ solids, loadingSolids }: { solids: SolidMeshData[
               innerW={innerW}
               innerH={innerH}
               canvasGutterPx={canvasGutterPx}
+              stackZIndex={stackZIndex}
               selected={selected}
               drawingDimensionMode={drawingDimensionMode}
               dimHoverThisView={dimHoverThisView}

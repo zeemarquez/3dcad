@@ -30,9 +30,9 @@ export const DrawingTopBar: React.FC<{
   fileActions?: DrawingFileToolbarActions;
   linkedPartId: string | null;
   linkedPartName?: string;
-  onSetLinkedPart: () => void;
   onPlaceView: () => void;
-}> = ({ onHomeClick, fileActions, linkedPartId, linkedPartName, onSetLinkedPart, onPlaceView }) => {
+  onPlaceIsoView: () => void;
+}> = ({ onHomeClick, fileActions, linkedPartId, linkedPartName, onPlaceView, onPlaceIsoView }) => {
   const [activeTab, setActiveTab] = useState<RibbonTab>('drawing');
 
   return (
@@ -58,8 +58,8 @@ export const DrawingTopBar: React.FC<{
           <DrawingTools
             linkedPartId={linkedPartId}
             linkedPartName={linkedPartName}
-            onSetLinkedPart={onSetLinkedPart}
             onPlaceView={onPlaceView}
+            onPlaceIsoView={onPlaceIsoView}
           />
         )}
         {activeTab === 'view' && <DrawingViewTools />}

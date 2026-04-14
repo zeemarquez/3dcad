@@ -9,15 +9,19 @@ import {
   areParallelStraightInView,
   endpointsHorizontalDimBetweenVerticalEdges,
   endpointsVerticalDimBetweenHorizontalEdges,
+  extractSolidDimensionPickMeta,
   isHorizontalInView,
   isVerticalInView,
+  modelVertexKey,
+  pickCircleCenterAtScreen,
   projectedSpanMm,
   validHorizontalDimParallelEdgePair,
   validVerticalDimParallelEdgePair,
 } from '../drawingDimensionMath';
 
 const HOVER_PX = 10;
-const HOVER_VERTEX_PX = 12;
+/** Screen px — vertex hit test and zone where vertex wins over collinear straight edges. */
+const HOVER_VERTEX_PX = 16;
 const DIM_BLACK = '#0a0a0a';
 const DIM_ORANGE = '#ea580c';
 const EXT_ALPHA = 0.85;
@@ -59,26 +63,137 @@ export function buildWorldEdgeSegments(
   return out;
 }
 
-/** Unique world-space vertices from solid edge endpoints (for vertex-pick dimensions). */
-function buildWorldVertices(
+/** World-space rim sample → circle center (rim-only tessellation); spatial match avoids key drift. */
+type RimSnapWorld = { rim: THREE.Vector3; center: THREE.Vector3 };
+
+/** ~0.25mm — match picked vertex to rim sample despite float / key rounding differences. */
+const RIM_SNAP_MATCH_MM = 0.25;
+
+/**
+ * If the cursor is within this screen distance of a vertex, that vertex wins over collinear H/V edges
+ * (otherwise edge distance 0 along a long line beats a corner vertex a few px away).
+ */
+function shouldPreferVertexOverStraightEdge(
+  ptNear: { dist: number } | null,
+  eNear: { dist: number } | null,
+): boolean {
+  if (!ptNear) return false;
+  if (ptNear.dist <= HOVER_VERTEX_PX) return true;
+  if (!eNear) return true;
+  return ptNear.dist <= eNear.dist;
+}
+
+/**
+ * All edge endpoints in world space + deduped list for any future use.
+ * `vertexPickList` lists every segment endpoint (no merge) so distinct corners never collapse.
+ * Circle centers added once. Rim-only points still snap to center in {@link pickWorldPointForDimension}.
+ */
+function buildWorldVerticesAndCircles(
   solids: SolidMeshData[],
   q: THREE.Quaternion,
   offset: THREE.Vector3,
-): THREE.Vector3[] {
-  const map = new Map<string, THREE.Vector3>();
+): {
+  /** Dense list for hover/pick — one entry per edge endpoint + circle centers (no key dedup). */
+  vertexPickList: THREE.Vector3[];
+  circlesWorld: { center: THREE.Vector3; rim: THREE.Vector3[] }[];
+  rimSnaps: RimSnapWorld[];
+} {
+  const vertexPickList: THREE.Vector3[] = [];
   const t = new THREE.Vector3();
+  const circlesWorld: { center: THREE.Vector3; rim: THREE.Vector3[] }[] = [];
+  const rimSnaps: RimSnapWorld[] = [];
+
   for (const s of solids) {
+    const { circles, rimOnlyExcludeModelKeys } = extractSolidDimensionPickMeta(s);
+    for (const info of circles) {
+      const centerW = info.centerModel.clone().applyQuaternion(q).add(offset);
+      const rimW = info.rimModel.map((p) => p.clone().applyQuaternion(q).add(offset));
+      circlesWorld.push({ center: centerW, rim: rimW });
+      for (let i = 0; i < info.rimModel.length; i++) {
+        const p = info.rimModel[i];
+        if (!rimOnlyExcludeModelKeys.has(modelVertexKey(p.x, p.y, p.z))) continue;
+        rimSnaps.push({ rim: rimW[i]!, center: centerW.clone() });
+      }
+    }
+
     const ev = s.edgeVertices;
     if (!ev || ev.length < 6) continue;
     for (let i = 0; i < ev.length; i += 6) {
       for (const k of [0, 3]) {
-        t.set(ev[i + k], ev[i + k + 1], ev[i + k + 2]).applyQuaternion(q).add(offset);
-        const key = `${t.x.toFixed(4)},${t.y.toFixed(4)},${t.z.toFixed(4)}`;
-        if (!map.has(key)) map.set(key, t.clone());
+        t.set(ev[i + k], ev[i + k + 1], ev[i + k + 2]);
+        t.applyQuaternion(q).add(offset);
+        vertexPickList.push(t.clone());
       }
     }
+    for (const info of circles) {
+      t.copy(info.centerModel).applyQuaternion(q).add(offset);
+      vertexPickList.push(t.clone());
+    }
   }
-  return [...map.values()];
+
+  return { vertexPickList, circlesWorld, rimSnaps };
+}
+
+function substituteRimPickForCircleCenter(
+  picked: THREE.Vector3,
+  rimSnaps: RimSnapWorld[],
+): THREE.Vector3 | null {
+  let bestCenter: THREE.Vector3 | null = null;
+  let bestD = RIM_SNAP_MATCH_MM;
+  for (const { rim, center } of rimSnaps) {
+    const d = picked.distanceTo(rim);
+    if (d < bestD) {
+      bestD = d;
+      bestCenter = center;
+    }
+  }
+  return bestCenter;
+}
+
+function screenDistToPoint(
+  p: THREE.Vector3,
+  cx: number,
+  cy: number,
+  camera: THREE.Camera,
+  w: number,
+  h: number,
+): number {
+  const t = p.clone().project(camera);
+  const px = (t.x * 0.5 + 0.5) * w;
+  const py = (-t.y * 0.5 + 0.5) * h;
+  return Math.hypot(cx - px, cy - py);
+}
+
+function pickWorldPointForDimension(
+  vertexPickList: THREE.Vector3[],
+  circlesWorld: { center: THREE.Vector3; rim: THREE.Vector3[] }[],
+  rimSnaps: RimSnapWorld[],
+  cx: number,
+  cy: number,
+  camera: THREE.Camera,
+  w: number,
+  h: number,
+): { point: THREE.Vector3; dist: number } | null {
+  const vHitRaw = pickNearestVertexAt(vertexPickList, cx, cy, camera, w, h, HOVER_VERTEX_PX);
+  let vHit = vHitRaw;
+  if (vHit) {
+    const sub = substituteRimPickForCircleCenter(vHit.point, rimSnaps);
+    if (sub) {
+      vHit = { point: sub, dist: screenDistToPoint(sub, cx, cy, camera, w, h) };
+    }
+  }
+  const cCenter = pickCircleCenterAtScreen(circlesWorld, cx, cy, camera, w, h, HOVER_VERTEX_PX);
+  let cDist = Infinity;
+  if (cCenter) {
+    cDist = screenDistToPoint(cCenter, cx, cy, camera, w, h);
+  }
+  if (vHit && cCenter) {
+    if (cDist < vHit.dist) return { point: cCenter, dist: cDist };
+    return vHit;
+  }
+  if (vHit) return vHit;
+  if (cCenter) return { point: cCenter, dist: cDist };
+  return null;
 }
 
 function distToSeg2(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
@@ -91,8 +206,25 @@ function distToSeg2(px: number, py: number, x1: number, y1: number, x2: number, 
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 
-function clientToCanvasPx(e: PointerEvent, rect: DOMRect): { cx: number; cy: number } {
-  return { cx: e.clientX - rect.left, cy: e.clientY - rect.top };
+/**
+ * Pointer position in the same pixel space as @react-three/fiber `size` / `Vector3.project` —
+ * critical when canvas CSS size ≠ internal buffer or with DPR scaling.
+ */
+function pointerInFiberCanvasSpace(
+  e: { clientX: number; clientY: number },
+  canvas: HTMLCanvasElement,
+  fiberW: number,
+  fiberH: number,
+): { cx: number; cy: number; w: number; h: number } {
+  const rect = canvas.getBoundingClientRect();
+  const rw = Math.max(rect.width, 1e-6);
+  const rh = Math.max(rect.height, 1e-6);
+  return {
+    cx: ((e.clientX - rect.left) / rw) * fiberW,
+    cy: ((e.clientY - rect.top) / rh) * fiberH,
+    w: fiberW,
+    h: fiberH,
+  };
 }
 
 function projectSegmentToCanvas(
@@ -122,8 +254,9 @@ function pickDimensionIdAt(
 ): string | null {
   let best: { id: string; d: number } | null = null;
   for (const dim of dimensions) {
-    const d = distanceToDimensionPick(dim, cx, cy, camera, w, h);
-    if (d <= 14 && (!best || d < best.d)) {
+    const d = distanceToDimensionLabelPick(dim, cx, cy, camera, w, h);
+    /** Pixels — generous slack after NDC + fiber/canvas alignment. */
+    if (d <= 56 && (!best || d < best.d)) {
       best = { id: dim.id, d };
     }
   }
@@ -200,6 +333,125 @@ function findNearestStraightEdgeWithDist(
   return best;
 }
 
+function closestTOnSegmentCanvas(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 1e-12) return 0;
+  return Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / len2));
+}
+
+/**
+ * Horizontal dimension ↔ vertical edges in view; vertical dimension ↔ horizontal edges.
+ * Used for point-to-line second picks and related hovers.
+ */
+function findNearestOrthoEdgeWithDist(
+  segments: { a: THREE.Vector3; b: THREE.Vector3 }[],
+  cx: number,
+  cy: number,
+  camera: THREE.Camera,
+  w: number,
+  h: number,
+  maxPx: number,
+  dimensionMode: 'horizontal' | 'vertical',
+): { index: number; dist: number; closestWorld: THREE.Vector3 } | null {
+  let best: { index: number; dist: number; closestWorld: THREE.Vector3 } | null = null;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const ok =
+      dimensionMode === 'horizontal' ? isVerticalInView(seg.a, seg.b) : isHorizontalInView(seg.a, seg.b);
+    if (!ok) continue;
+    const { ax, ay, bx, by } = projectSegmentToCanvas(seg.a, seg.b, camera, w, h);
+    const d = distToSeg2(cx, cy, ax, ay, bx, by);
+    if (d <= maxPx && (!best || d < best.dist)) {
+      const t = closestTOnSegmentCanvas(cx, cy, ax, ay, bx, by);
+      const closestWorld = new THREE.Vector3().copy(seg.a).lerp(seg.b, t);
+      best = { index: i, dist: d, closestWorld };
+    }
+  }
+  return best;
+}
+
+/**
+ * First pick (no pending): Shift = only the parallel-edge family (vertical for H dim, horizontal for V dim).
+ * Otherwise vertex/circle vs aligned straight edge — never diagonal mesh edges.
+ */
+function computeIdleDimensionPickHover(
+  shiftKey: boolean,
+  mode: 'horizontal' | 'vertical',
+  vertexPickList: THREE.Vector3[],
+  circlesWorld: { center: THREE.Vector3; rim: THREE.Vector3[] }[],
+  rimSnaps: RimSnapWorld[],
+  segments: { a: THREE.Vector3; b: THREE.Vector3 }[],
+  cx: number,
+  cy: number,
+  camera: THREE.Camera,
+  w: number,
+  h: number,
+): { hoverSnapVertex: { x: number; y: number; z: number } | null; hoverEdgeIndex: number | null } {
+  if (shiftKey) {
+    const eOrtho = findNearestOrthoEdgeWithDist(segments, cx, cy, camera, w, h, HOVER_PX, mode);
+    return {
+      hoverSnapVertex: null,
+      hoverEdgeIndex: eOrtho ? eOrtho.index : null,
+    };
+  }
+  const ptNear = pickWorldPointForDimension(vertexPickList, circlesWorld, rimSnaps, cx, cy, camera, w, h);
+  const eNear = findNearestStraightEdgeWithDist(segments, cx, cy, camera, w, h, HOVER_PX, mode);
+  const preferVertex = shouldPreferVertexOverStraightEdge(ptNear, eNear);
+  if (preferVertex && ptNear) {
+    return {
+      hoverSnapVertex: { x: ptNear.point.x, y: ptNear.point.y, z: ptNear.point.z },
+      hoverEdgeIndex: null,
+    };
+  }
+  if (eNear) {
+    return { hoverSnapVertex: null, hoverEdgeIndex: eNear.index };
+  }
+  return { hoverSnapVertex: null, hoverEdgeIndex: null };
+}
+
+/** Second point after placing first vertex: another vertex, or closest point on an orthogonal straight edge. */
+function pickPendingSecondAttachment(
+  vertexPickList: THREE.Vector3[],
+  circlesWorld: { center: THREE.Vector3; rim: THREE.Vector3[] }[],
+  rimSnaps: RimSnapWorld[],
+  segments: { a: THREE.Vector3; b: THREE.Vector3 }[],
+  cx: number,
+  cy: number,
+  camera: THREE.Camera,
+  w: number,
+  h: number,
+  dimensionMode: 'horizontal' | 'vertical',
+):
+  | { kind: 'vertex'; point: THREE.Vector3; dist: number }
+  | { kind: 'edge'; point: THREE.Vector3; dist: number; edgeIndex: number }
+  | null {
+  const vHit = pickWorldPointForDimension(
+    vertexPickList,
+    circlesWorld,
+    rimSnaps,
+    cx,
+    cy,
+    camera,
+    w,
+    h,
+  );
+  const eOrtho = findNearestOrthoEdgeWithDist(segments, cx, cy, camera, w, h, HOVER_PX, dimensionMode);
+  if (!vHit && !eOrtho) return null;
+  if (!eOrtho) return { kind: 'vertex', point: vHit!.point, dist: vHit!.dist };
+  if (!vHit) return { kind: 'edge', point: eOrtho.closestWorld, dist: eOrtho.dist, edgeIndex: eOrtho.index };
+  if (vHit.dist <= eOrtho.dist) return { kind: 'vertex', point: vHit.point, dist: vHit.dist };
+  return { kind: 'edge', point: eOrtho.closestWorld, dist: eOrtho.dist, edgeIndex: eOrtho.index };
+}
+
 function findNearestParallelEdgeForPending(
   segments: { a: THREE.Vector3; b: THREE.Vector3 }[],
   cx: number,
@@ -236,7 +488,14 @@ function findNearestParallelEdgeForPending(
   return best;
 }
 
-function distanceToDimensionPick(
+/** Matches `<Text position … z+0.15 />` in {@link IsoDimensionLines}. */
+const LABEL_POS_Z_OFFSET = 0.15;
+
+/**
+ * Distance in screen px from (cx,cy) to the label hit region. Uses NDC (same as `Vector3.project`)
+ * plus a generous troika/drei text bounds in world space. `cx,cy,w,h` must be {@link pointerInFiberCanvasSpace}.
+ */
+function distanceToDimensionLabelPick(
   dim: DrawingSheetDimension,
   cx: number,
   cy: number,
@@ -244,24 +503,73 @@ function distanceToDimensionPick(
   w: number,
   h: number,
 ): number {
-  const pts = isoDimensionLayout(dim);
-  const lines: [THREE.Vector3, THREE.Vector3][] = [
-    [pts.ext1a, pts.ext1b],
-    [pts.ext2a, pts.ext2b],
-    [pts.dima, pts.dimb],
-  ];
-  if (pts.leaderA && pts.leaderB) lines.push([pts.leaderA, pts.leaderB]);
-  let minD = Infinity;
-  for (const [a, b] of lines) {
-    const { ax, ay, bx, by } = projectSegmentToCanvas(a, b, camera, w, h);
-    const d = distToSeg2(cx, cy, ax, ay, bx, by);
-    if (d < minD) minD = d;
+  camera.updateMatrixWorld(true);
+  if ('updateProjectionMatrix' in camera && typeof camera.updateProjectionMatrix === 'function') {
+    camera.updateProjectionMatrix();
   }
-  const mid = pts.labelPos.clone().project(camera);
-  const lx = (mid.x * 0.5 + 0.5) * w;
-  const ly = (-mid.y * 0.5 + 0.5) * h;
-  minD = Math.min(minD, Math.hypot(cx - lx, cy - ly));
-  return minD;
+
+  const layout = isoDimensionLayout(dim);
+  const span = projectedSpanMm(
+    dim.kind,
+    new THREE.Vector3(dim.ax, dim.ay, dim.az),
+    new THREE.Vector3(dim.bx, dim.by, dim.bz),
+  );
+  const str = `${span.toFixed(2)}`;
+  const letterPad = TEXT_SCALE * 0.05 * Math.max(0, str.length - 1);
+  const halfAlong =
+    (Math.max(TEXT_HALF_ALONG_MM * 1.25, str.length * TEXT_SCALE * 0.6) + letterPad * 0.5) * 1.4;
+  const halfPerp = TEXT_SCALE * 1.15;
+
+  const center = layout.labelPos.clone();
+  center.z += LABEL_POS_Z_OFFSET;
+
+  const qRot = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, layout.textRotationZ));
+  const along = new THREE.Vector3(1, 0, 0).applyQuaternion(qRot);
+  const perp = new THREE.Vector3(0, 1, 0).applyQuaternion(qRot);
+
+  const corners: THREE.Vector3[] = [
+    center.clone().addScaledVector(along, halfAlong).addScaledVector(perp, halfPerp),
+    center.clone().addScaledVector(along, halfAlong).addScaledVector(perp, -halfPerp),
+    center.clone().addScaledVector(along, -halfAlong).addScaledVector(perp, -halfPerp),
+    center.clone().addScaledVector(along, -halfAlong).addScaledVector(perp, halfPerp),
+  ];
+
+  let minNdcX = Infinity;
+  let maxNdcX = -Infinity;
+  let minNdcY = Infinity;
+  let maxNdcY = -Infinity;
+  for (const p of corners) {
+    const ndc = p.clone().project(camera);
+    const x = ndc.x;
+    const y = ndc.y;
+    minNdcX = Math.min(minNdcX, x);
+    maxNdcX = Math.max(maxNdcX, x);
+    minNdcY = Math.min(minNdcY, y);
+    maxNdcY = Math.max(maxNdcY, y);
+  }
+
+  if (!Number.isFinite(minNdcX)) return Infinity;
+
+  const padNdc = 0.04;
+  minNdcX -= padNdc;
+  maxNdcX += padNdc;
+  minNdcY -= padNdc;
+  maxNdcY += padNdc;
+
+  const ndcMx = (cx / w) * 2 - 1;
+  const ndcMy = -(cy / h) * 2 + 1;
+
+  const dxNdc = ndcMx < minNdcX ? minNdcX - ndcMx : ndcMx > maxNdcX ? ndcMx - maxNdcX : 0;
+  const dyNdc = ndcMy < minNdcY ? minNdcY - ndcMy : ndcMy > maxNdcY ? ndcMy - maxNdcY : 0;
+  const distBoxPx = Math.hypot(dxNdc * (w / 2), dyNdc * (h / 2));
+
+  const cNdc = center.clone().project(camera);
+  const distCenterPx = Math.hypot(
+    ((cNdc.x - ndcMx) * w) / 2,
+    ((cNdc.y - ndcMy) * h) / 2,
+  );
+
+  return Math.min(distBoxPx, distCenterPx);
 }
 
 /** Pick & hover edges; draw dimensions; selection + drag (offset ⟂, along ∥ to measurement). */
@@ -287,13 +595,20 @@ export function DrawingOrthoDimensionLayer({
   /** Right-click on a dimension to open a sheet-level menu (e.g. delete). */
   onDimensionContextMenu?: (detail: { dimensionId: string; clientX: number; clientY: number }) => void;
 }) {
-  const { camera, gl } = useThree();
+  const { camera, gl, size } = useThree();
+  const canvasW = size.width;
+  const canvasH = size.height;
   const setHoveredDimensionId = useDrawingStore((s) => s.setHoveredDimensionId);
   const setSelectedDimensionId = useDrawingStore((s) => s.setSelectedDimensionId);
   const selectedDimensionId = useDrawingStore((s) => s.selectedDimensionId);
 
   const segments = useMemo(() => buildWorldEdgeSegments(solids, q, offset), [solids, q, offset]);
-  const worldVertices = useMemo(() => buildWorldVertices(solids, q, offset), [solids, q, offset]);
+  const { vertexPickList, circlesWorld, rimSnaps } = useMemo(
+    () => buildWorldVerticesAndCircles(solids, q, offset),
+    [solids, q, offset],
+  );
+  /** Last pointer position on the view canvas (for Shift hover refresh without moving). */
+  const lastDimPointerRef = useRef<{ cx: number; cy: number; w: number; h: number } | null>(null);
   const [hoverEdgeIndex, setHoverEdgeIndex] = useState<number | null>(null);
   const hoverEdgeIndexRef = useRef<number | null>(null);
   const [pendingVertex, setPendingVertex] = useState<{ x: number; y: number; z: number } | null>(null);
@@ -342,27 +657,30 @@ export function DrawingOrthoDimensionLayer({
 
     const onMove = (e: PointerEvent) => {
       if (dragRef.current) return;
-      const rect = el.getBoundingClientRect();
-      const { cx, cy } = clientToCanvasPx(e, rect);
-      const w = rect.width;
-      const h = rect.height;
+      const { cx, cy, w, h } = pointerInFiberCanvasSpace(e, el, canvasW, canvasH);
 
-      const dimUnder = pickDimensionIdAt(dimensions, cx, cy, camera, w, h);
-      setHoveredDimensionId(dimUnder);
-
-      if (dimUnder) {
-        hoverEdgeIndexRef.current = null;
-        setHoverEdgeIndex(null);
-        setHoverSnapVertex(null);
-        return;
+      if (dimensionMode) {
+        setHoveredDimensionId(null);
+      } else {
+        const dimUnder = pickDimensionIdAt(dimensions, cx, cy, camera, w, h);
+        setHoveredDimensionId(dimUnder);
+        if (dimUnder) {
+          hoverEdgeIndexRef.current = null;
+          setHoverEdgeIndex(null);
+          setHoverSnapVertex(null);
+          return;
+        }
       }
 
       if (!dimensionMode) {
+        lastDimPointerRef.current = null;
         hoverEdgeIndexRef.current = null;
         setHoverEdgeIndex(null);
         setHoverSnapVertex(null);
         return;
       }
+
+      lastDimPointerRef.current = { cx, cy, w, h };
 
       const mode = dimensionMode;
 
@@ -388,30 +706,50 @@ export function DrawingOrthoDimensionLayer({
       }
 
       if (pendingVertex != null) {
-        const vHit = pickNearestVertexAt(worldVertices, cx, cy, camera, w, h, HOVER_VERTEX_PX);
-        if (vHit) {
-          setHoverSnapVertex({ x: vHit.point.x, y: vHit.point.y, z: vHit.point.z });
+        const second = pickPendingSecondAttachment(
+          vertexPickList,
+          circlesWorld,
+          rimSnaps,
+          segments,
+          cx,
+          cy,
+          camera,
+          w,
+          h,
+          mode,
+        );
+        if (second) {
+          setHoverSnapVertex({ x: second.point.x, y: second.point.y, z: second.point.z });
+          if (second.kind === 'edge') {
+            hoverEdgeIndexRef.current = second.edgeIndex;
+            setHoverEdgeIndex(second.edgeIndex);
+          } else {
+            hoverEdgeIndexRef.current = null;
+            setHoverEdgeIndex(null);
+          }
         } else {
           setHoverSnapVertex(null);
+          hoverEdgeIndexRef.current = null;
+          setHoverEdgeIndex(null);
         }
-        hoverEdgeIndexRef.current = null;
-        setHoverEdgeIndex(null);
         return;
       }
 
-      const vNear = pickNearestVertexAt(worldVertices, cx, cy, camera, w, h, HOVER_VERTEX_PX);
-      const eNear = findNearestStraightEdgeWithDist(segments, cx, cy, camera, w, h, HOVER_PX, mode);
-      const preferVertex = vNear && (!eNear || vNear.dist <= eNear.dist);
-      if (preferVertex && vNear) {
-        bestI = null;
-        setHoverSnapVertex({ x: vNear.point.x, y: vNear.point.y, z: vNear.point.z });
-      } else if (eNear) {
-        bestI = eNear.index;
-        setHoverSnapVertex(null);
-      } else {
-        bestI = null;
-        setHoverSnapVertex(null);
-      }
+      const idle = computeIdleDimensionPickHover(
+        e.shiftKey,
+        mode,
+        vertexPickList,
+        circlesWorld,
+        rimSnaps,
+        segments,
+        cx,
+        cy,
+        camera,
+        w,
+        h,
+      );
+      bestI = idle.hoverEdgeIndex;
+      setHoverSnapVertex(idle.hoverSnapVertex);
       hoverEdgeIndexRef.current = bestI;
       setHoverEdgeIndex((prev) => (prev === bestI ? prev : bestI));
     };
@@ -426,41 +764,37 @@ export function DrawingOrthoDimensionLayer({
     const onDown = (e: PointerEvent) => {
       if (e.button !== 0) return;
       const rect = el.getBoundingClientRect();
-      const { cx, cy } = clientToCanvasPx(e, rect);
-      const w = rect.width;
-      const h = rect.height;
+      const { cx, cy, w, h } = pointerInFiberCanvasSpace(e, el, canvasW, canvasH);
 
-      const dimUnder = pickDimensionIdAt(dimensions, cx, cy, camera, w, h);
-      if (dimUnder) {
-        const dim = dimensions.find((d) => d.id === dimUnder);
-        if (!dim) return;
-        setSelectedDimensionId(dimUnder);
-        dragRef.current = {
-          id: dimUnder,
-          startOffset: dim.offsetMm,
-          startAlong: dim.alongMm ?? 0,
-          startClientX: e.clientX,
-          startClientY: e.clientY,
-          viewWidthPx: w,
-          viewHeightPx: h,
-          viewSpanMm: (camera as THREE.OrthographicCamera).top - (camera as THREE.OrthographicCamera).bottom,
-          viewSpanXMm: (camera as THREE.OrthographicCamera).right - (camera as THREE.OrthographicCamera).left,
-          kind: dim.kind,
-        };
-        el.setPointerCapture(e.pointerId);
-        e.stopPropagation();
-        e.preventDefault();
-        return;
+      if (!dimensionMode) {
+        const dimUnder = pickDimensionIdAt(dimensions, cx, cy, camera, w, h);
+        if (dimUnder) {
+          const dim = dimensions.find((d) => d.id === dimUnder);
+          if (!dim) return;
+          setSelectedDimensionId(dimUnder);
+          dragRef.current = {
+            id: dimUnder,
+            startOffset: dim.offsetMm,
+            startAlong: dim.alongMm ?? 0,
+            startClientX: e.clientX,
+            startClientY: e.clientY,
+            viewWidthPx: rect.width,
+            viewHeightPx: rect.height,
+            viewSpanMm: (camera as THREE.OrthographicCamera).top - (camera as THREE.OrthographicCamera).bottom,
+            viewSpanXMm: (camera as THREE.OrthographicCamera).right - (camera as THREE.OrthographicCamera).left,
+            kind: dim.kind,
+          };
+          el.setPointerCapture(e.pointerId);
+          e.stopPropagation();
+          e.preventDefault();
+          return;
+        }
       }
 
       if (dimensionMode) {
         const mode = dimensionMode;
         const ortho = camera as THREE.OrthographicCamera;
         const defaultOff = Math.min(14, (ortho.top - ortho.bottom) * 0.06);
-
-        const vNear = pickNearestVertexAt(worldVertices, cx, cy, camera, w, h, HOVER_VERTEX_PX);
-        const eNear = findNearestStraightEdgeWithDist(segments, cx, cy, camera, w, h, HOVER_PX, mode);
-        const preferVertex = vNear && (!eNear || vNear.dist <= eNear.dist);
 
         const addDim = (ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
           onAddDimension({
@@ -478,9 +812,21 @@ export function DrawingOrthoDimensionLayer({
         };
 
         if (pendingVertex != null) {
-          if (vNear) {
+          const second = pickPendingSecondAttachment(
+            vertexPickList,
+            circlesWorld,
+            rimSnaps,
+            segments,
+            cx,
+            cy,
+            camera,
+            w,
+            h,
+            mode,
+          );
+          if (second) {
             const a = new THREE.Vector3(pendingVertex.x, pendingVertex.y, pendingVertex.z);
-            const b = vNear.point;
+            const b = second.point;
             const span = projectedSpanMm(mode, a, b);
             if (span < 1e-9) {
               setPendingVertex(null);
@@ -557,14 +903,25 @@ export function DrawingOrthoDimensionLayer({
           return;
         }
 
-        if (e.shiftKey && !preferVertex && eNear) {
-          setPendingEdgeIndex(eNear.index);
+        if (e.shiftKey) {
+          const eOrtho = findNearestOrthoEdgeWithDist(segments, cx, cy, camera, w, h, HOVER_PX, mode);
+          if (eOrtho) {
+            setPendingEdgeIndex(eOrtho.index);
+            e.stopPropagation();
+            e.preventDefault();
+            return;
+          }
           e.stopPropagation();
           e.preventDefault();
           return;
         }
-        if (preferVertex && vNear) {
-          setPendingVertex({ x: vNear.point.x, y: vNear.point.y, z: vNear.point.z });
+
+        const ptNear = pickWorldPointForDimension(vertexPickList, circlesWorld, rimSnaps, cx, cy, camera, w, h);
+        const eNear = findNearestStraightEdgeWithDist(segments, cx, cy, camera, w, h, HOVER_PX, mode);
+        const preferVertex = shouldPreferVertexOverStraightEdge(ptNear, eNear);
+
+        if (preferVertex && ptNear) {
+          setPendingVertex({ x: ptNear.point.x, y: ptNear.point.y, z: ptNear.point.z });
           e.stopPropagation();
           e.preventDefault();
           return;
@@ -623,16 +980,38 @@ export function DrawingOrthoDimensionLayer({
 
     const onContextMenu = (e: MouseEvent) => {
       if (!onDimensionContextMenu) return;
-      const rect = el.getBoundingClientRect();
-      const { cx, cy } = clientToCanvasPx(e, rect);
-      const w = rect.width;
-      const h = rect.height;
+      if (dimensionMode) return;
+      const { cx, cy, w, h } = pointerInFiberCanvasSpace(e, el, canvasW, canvasH);
       const dimUnder = pickDimensionIdAt(dimensions, cx, cy, camera, w, h);
       if (!dimUnder) return;
       e.preventDefault();
       e.stopPropagation();
       setSelectedDimensionId(dimUnder);
       onDimensionContextMenu({ dimensionId: dimUnder, clientX: e.clientX, clientY: e.clientY });
+    };
+
+    const onShiftKeyHover = (ev: KeyboardEvent) => {
+      if (ev.key !== 'Shift') return;
+      if (!dimensionMode) return;
+      if (pendingEdgeIndex != null || pendingVertex != null) return;
+      const L = lastDimPointerRef.current;
+      if (!L) return;
+      const idle = computeIdleDimensionPickHover(
+        ev.shiftKey,
+        dimensionMode,
+        vertexPickList,
+        circlesWorld,
+        rimSnaps,
+        segments,
+        L.cx,
+        L.cy,
+        camera,
+        L.w,
+        L.h,
+      );
+      hoverEdgeIndexRef.current = idle.hoverEdgeIndex;
+      setHoverEdgeIndex(idle.hoverEdgeIndex);
+      setHoverSnapVertex(idle.hoverSnapVertex);
     };
 
     el.addEventListener('pointermove', onMove);
@@ -642,6 +1021,8 @@ export function DrawingOrthoDimensionLayer({
     window.addEventListener('pointermove', onMoveDrag);
     window.addEventListener('pointerup', onUpDrag);
     window.addEventListener('pointercancel', onUpDrag);
+    window.addEventListener('keydown', onShiftKeyHover);
+    window.addEventListener('keyup', onShiftKeyHover);
 
     return () => {
       el.removeEventListener('pointermove', onMove);
@@ -651,6 +1032,8 @@ export function DrawingOrthoDimensionLayer({
       window.removeEventListener('pointermove', onMoveDrag);
       window.removeEventListener('pointerup', onUpDrag);
       window.removeEventListener('pointercancel', onUpDrag);
+      window.removeEventListener('keydown', onShiftKeyHover);
+      window.removeEventListener('keyup', onShiftKeyHover);
     };
   }, [
     camera,
@@ -666,7 +1049,11 @@ export function DrawingOrthoDimensionLayer({
     setHoveredDimensionId,
     setSelectedDimensionId,
     viewId,
-    worldVertices,
+    vertexPickList,
+    circlesWorld,
+    rimSnaps,
+    canvasW,
+    canvasH,
   ]);
 
   const hoverGeom = useMemo(() => {

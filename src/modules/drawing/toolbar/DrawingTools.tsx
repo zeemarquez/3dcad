@@ -1,17 +1,17 @@
-import { LayoutTemplate, Link2, ArrowLeftRight, ArrowUpDown } from 'lucide-react';
+import { Box, LayoutTemplate, ArrowLeftRight, ArrowUpDown } from 'lucide-react';
 import { ToolBtn, Sep } from '@/modules/part/toolbar/ToolBtn';
 import { useDrawingStore } from '../store/useDrawingStore';
 
 export function DrawingTools({
   linkedPartId,
   linkedPartName,
-  onSetLinkedPart,
   onPlaceView,
+  onPlaceIsoView,
 }: {
   linkedPartId: string | null;
   linkedPartName?: string;
-  onSetLinkedPart: () => void;
   onPlaceView: () => void;
+  onPlaceIsoView: () => void;
 }) {
   const drawingDimensionMode = useDrawingStore((s) => s.drawingDimensionMode);
   const setDrawingDimensionMode = useDrawingStore((s) => s.setDrawingDimensionMode);
@@ -19,19 +19,18 @@ export function DrawingTools({
   return (
     <div className="flex items-center gap-1 overflow-x-auto">
       <ToolBtn
-        icon={Link2}
-        label="Link part"
-        showLabel
-        title="Choose which part this drawing references"
-        onClick={onSetLinkedPart}
-      />
-      <Sep />
-      <ToolBtn
         icon={LayoutTemplate}
         label="Place view"
         showLabel
         title="Insert an orthographic view of the linked part"
         onClick={onPlaceView}
+      />
+      <ToolBtn
+        icon={Box}
+        label="Iso view"
+        showLabel
+        title="Insert an isometric orthographic view — free placement on the sheet"
+        onClick={onPlaceIsoView}
       />
       <Sep />
       <ToolBtn
@@ -39,7 +38,7 @@ export function DrawingTools({
         label="H dim"
         variant="dimension"
         active={drawingDimensionMode === 'horizontal'}
-        title="Horizontal dimension — click a horizontal edge; or two vertices; or Shift+click a vertical edge then a second parallel vertical edge"
+        title="Horizontal dimension — horizontal edge length; two points; point then vertical line; hold Shift and pick a vertical edge, then a parallel vertical edge"
         onClick={() =>
           setDrawingDimensionMode(drawingDimensionMode === 'horizontal' ? null : 'horizontal')
         }
@@ -49,7 +48,7 @@ export function DrawingTools({
         label="V dim"
         variant="dimension"
         active={drawingDimensionMode === 'vertical'}
-        title="Vertical dimension — click a vertical edge; or two vertices; or Shift+click a horizontal edge then a second parallel horizontal edge"
+        title="Vertical dimension — vertical edge length; two points; point then horizontal line; hold Shift and pick a horizontal edge, then a parallel horizontal edge"
         onClick={() =>
           setDrawingDimensionMode(drawingDimensionMode === 'vertical' ? null : 'vertical')
         }
