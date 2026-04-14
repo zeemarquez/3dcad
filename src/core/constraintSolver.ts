@@ -1,7 +1,14 @@
 export interface SolverPoint { id: string; x: number; y: number; }
 export interface SolverLine { id: string; p1Id: string; p2Id: string; }
 export interface SolverCircle { id: string; centerId: string; radius: number; }
-export interface SolverArc { id: string; centerId: string; startId: string; endId: string; }
+export interface SolverArc {
+  id: string;
+  centerId: string;
+  startId: string;
+  endId: string;
+  /** When set, arc uses the major branch between start/end (see sketchArcPoints). */
+  complementaryArc?: boolean;
+}
 
 export interface SolverConstraint {
   id: string;

@@ -22,14 +22,7 @@ import { mergeCoincidentSketchVertices, pickNextEdgeInFace, snapClosedPolyline }
 /** World snap cursor position; `snapped` is set when the cursor locked to an existing sketch point (see `snapWorld`). */
 type SketchDrawSnap = { x: number; y: number; snapped?: string | null };
 import { featuresToCadFeatureInputs } from '@/modules/part/kernel/cadFeatureInputs';
-import {
-  solveConstraints,
-  type SolverPoint,
-  type SolverLine,
-  type SolverCircle,
-  type SolverArc,
-  type SolverConstraint,
-} from '@/core/constraintSolver';
+import { computeSketchDoFState, type SketchDoFState } from '@/core/sketchDoF';
 
 function evaluateInputExpression(
   raw: string,
@@ -302,16 +295,12 @@ export const Sketcher2D: React.FC = () => {
   const [isDraggingEntity, setIsDraggingEntity] = useState(false);
   const circleRadiusDragRef = useRef<{ circleId: string } | null>(null);
   const [isDraggingCircleRadius, setIsDraggingCircleRadius] = useState(false);
-  const dofCacheRef = useRef<{
-    pointDoF: Map<string, number>;
-    lineDoF: Map<string, number>;
-    arcDoF: Map<string, number>;
-    circleDoF: Map<string, number>;
-  }>({
+  const dofCacheRef = useRef<SketchDoFState>({
     pointDoF: new Map(),
     lineDoF: new Map(),
     arcDoF: new Map(),
     circleDoF: new Map(),
+    isSketchFullyConstrained: false,
   });
 
   // Drawing state
@@ -1262,136 +1251,20 @@ export const Sketcher2D: React.FC = () => {
   );
 
   const dofState = useMemo(() => {
-    // DoF estimation is expensive (many solver calls). Freeze during drag
-    // for smooth interaction, then refresh on release.
+    // DoF estimation is expensive (many planegcs solves). Freeze during drag.
     if (draggingPointId || isDraggingEntity || isDraggingCircleRadius) return dofCacheRef.current;
 
-    const pointById = new Map(points.map((p) => [p.id, p]));
-    const constraintsInput = constraints as SolverConstraint[];
-    const basePoints = points as SolverPoint[];
-    const linesInput = lines as SolverLine[];
-    const circlesInput = circles as SolverCircle[];
-    const arcsInput = arcs as SolverArc[];
-    const PERTURB = 0.2;
-    const MOVED_EPS = 1e-4;
-    const DEP_EPS = 1e-5;
-    const constrainedPointIds = new Set<string>();
-    for (const cn of constraints) {
-      for (const eid of cn.entityIds) {
-        if (pointById.has(eid)) {
-          constrainedPointIds.add(eid);
-          continue;
-        }
-        const l = lines.find((x) => x.id === eid);
-        if (l) {
-          constrainedPointIds.add(l.p1Id);
-          constrainedPointIds.add(l.p2Id);
-          continue;
-        }
-        const c = circles.find((x) => x.id === eid);
-        if (c) {
-          constrainedPointIds.add(c.centerId);
-          continue;
-        }
-        const a = arcs.find((x) => x.id === eid);
-        if (a) {
-          constrainedPointIds.add(a.centerId);
-          constrainedPointIds.add(a.startId);
-          constrainedPointIds.add(a.endId);
-        }
-      }
-    }
-
-    const gramSchmidtRank = (vectors: number[][]): number => {
-      const basis: number[][] = [];
-      for (const v0 of vectors) {
-        let v = [...v0];
-        for (const b of basis) {
-          let dotVB = 0;
-          let dotBB = 0;
-          for (let i = 0; i < v.length; i++) {
-            dotVB += v[i] * b[i];
-            dotBB += b[i] * b[i];
-          }
-          if (dotBB > 0) {
-            const s = dotVB / dotBB;
-            for (let i = 0; i < v.length; i++) v[i] -= s * b[i];
-          }
-        }
-        let norm2 = 0;
-        for (const x of v) norm2 += x * x;
-        if (norm2 > DEP_EPS) basis.push(v);
-      }
-      return basis.length;
-    };
-
-    const estimateEntityDoF = (entityPointIds: string[]): number => {
-      const uniq = [...new Set(entityPointIds)];
-      if (uniq.length === 0) return 0;
-      // If no constraints touch this entity's points, it is fully free.
-      if (!uniq.some((pid) => constrainedPointIds.has(pid))) return uniq.length * 2;
-      const baseIdxById = new Map(basePoints.map((p, i) => [p.id, i]));
-      const vectors: number[][] = [];
-
-      for (const pid of uniq) {
-        const p = pointById.get(pid);
-        if (!p) continue;
-        for (const axis of ['x', 'y'] as const) {
-          const tx = axis === 'x' ? p.x + PERTURB : p.x;
-          const ty = axis === 'y' ? p.y + PERTURB : p.y;
-          const solved = solveConstraints(
-            basePoints,
-            linesInput,
-            circlesInput,
-            arcsInput,
-            constraintsInput,
-            { pointId: pid, x: tx, y: ty, strength: 0.25 },
-            300,
-            1   // constraintScale=1: no DRAG_CONSTRAINT_SCALE for DoF probing
-          );
-
-          const vec: number[] = [];
-          let moved = false;
-          for (const eid of uniq) {
-            const idx = baseIdxById.get(eid);
-            if (idx === undefined) continue;
-            const b = basePoints[idx];
-            const s = solved.points[idx];
-            const dx = s.x - b.x;
-            const dy = s.y - b.y;
-            vec.push(dx, dy);
-            if (Math.hypot(dx, dy) > MOVED_EPS) moved = true;
-          }
-          if (moved && solved.constraintEnergy < 1e-4) vectors.push(vec);
-        }
-      }
-      return gramSchmidtRank(vectors);
-    };
-
-    const pointDoF = new Map<string, number>();
-    for (const p of points) pointDoF.set(p.id, estimateEntityDoF([p.id]));
-
-    const lineDoF = new Map<string, number>();
-    for (const l of lines) lineDoF.set(l.id, estimateEntityDoF([l.p1Id, l.p2Id]));
-
-    const arcDoF = new Map<string, number>();
-    for (const a of arcs) arcDoF.set(a.id, estimateEntityDoF([a.centerId, a.startId, a.endId]));
-
-    const circleDoF = new Map<string, number>();
-    for (const c of circles) {
-      // Circle has center translation dof from center point + radius dof unless constrained.
-      const centerDof = estimateEntityDoF([c.centerId]);
-      const hasRadiusConstraint = constraints.some(
-        (cn) => (cn.type === 'radius' || cn.type === 'arcRadius') && cn.entityIds.includes(c.id)
-      );
-      const radiusDof = hasRadiusConstraint ? 0 : 1;
-      circleDoF.set(c.id, centerDof + radiusDof);
-    }
-
-    const next = { pointDoF, lineDoF, arcDoF, circleDoF };
+    const next = computeSketchDoFState({
+      points,
+      lines,
+      circles,
+      arcs,
+      constraints,
+      bsplines,
+    });
     dofCacheRef.current = next;
     return next;
-  }, [points, lines, circles, arcs, constraints, draggingPointId, isDraggingEntity, isDraggingCircleRadius]);
+  }, [points, lines, circles, arcs, constraints, bsplines, draggingPointId, isDraggingEntity, isDraggingCircleRadius]);
 
   const fullyConstrainedPointIds = useMemo(() => {
     const ids = new Set<string>();
@@ -1413,25 +1286,6 @@ export const Sketcher2D: React.FC = () => {
     for (const [id, d] of dofState.circleDoF.entries()) if (d === 0) ids.add(id);
     return ids;
   }, [dofState]);
-  const isSketchFullyConstrained = useMemo(() => {
-    if (
-      points.length === 0 &&
-      lines.length === 0 &&
-      arcs.length === 0 &&
-      circles.length === 0 &&
-      bsplines.length === 0
-    )
-      return false;
-    const pointOk = points.every((p) => dofState.pointDoF.get(p.id) === 0);
-    const lineOk = lines.every((l) => dofState.lineDoF.get(l.id) === 0);
-    const arcOk = arcs.every((a) => dofState.arcDoF.get(a.id) === 0);
-    const circleOk = circles.every((c) => dofState.circleDoF.get(c.id) === 0);
-    const bsplineOk = bsplines.every((b) =>
-      b.controlPointIds.every((pid) => dofState.pointDoF.get(pid) === 0)
-    );
-    return pointOk && lineOk && arcOk && circleOk && bsplineOk;
-  }, [points, lines, arcs, circles, bsplines, dofState]);
-
   const getEntityColor = useCallback(
     (type: string, id: string) => {
       if (isSelected(type, id)) return COLORS.entitySelected;
@@ -2270,7 +2124,7 @@ export const Sketcher2D: React.FC = () => {
             <path
               key={`region_${i}`}
               d={r.path}
-              fill={isSketchFullyConstrained ? COLORS.constrained : COLORS.entity}
+              fill={dofState.isSketchFullyConstrained ? COLORS.constrained : COLORS.entity}
               fillOpacity={0.22}
               fillRule="evenodd"
               stroke="none"

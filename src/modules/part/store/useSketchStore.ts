@@ -6,7 +6,7 @@ import {
   type SolverCircle,
   type SolverArc,
   type SolverConstraint,
-} from '@/core/constraintSolver';
+} from '@/core/planegcsConstraintBridge';
 import { sampleArcPoints } from '@/core/sketchArcPoints';
 import {
   BSPLINE_DEFAULT_DEGREE,
@@ -1161,8 +1161,7 @@ export const useSketchStore = create<SketchState>((set, get) => ({
 
     if (state.constraints.some((c) => c.type === 'fix' && c.entityIds[0] === pointId)) return;
 
-    // Single solver call per frame. DRAG_CONSTRAINT_SCALE (1e4) inside
-    // solveConstraints keeps constraints tight, so sub-stepping is unnecessary.
+    // Single solver call per frame (planegcs temporary coordinate constraints toward cursor).
     // Projection is deferred to finalizeDrag (called on pointer-up).
     const result = solveConstraints(
       state.points as SolverPoint[],
