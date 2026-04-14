@@ -12,7 +12,8 @@ Browser-based **parametric 3D CAD** in the vein of desktop modelers — parts, a
 - **Reference geometry** — User **planes**, **points**, and **axes** for sketches and operations.
 - **Parameters** — Global and dimension-driven values for driving the model.
 - **3D viewport** — Shaded bodies with orbit controls, **XYZ gizmo**, optional grid, orthographic / perspective, and **standard views** (front, back, left, right, top, bottom, isometric).
-- **Documents** — **Home** screen with **recent parts** and live thumbnails; rename, **Save As**, download **`.par`**, duplicate, **export STEP** and **STL**.
+- **Drawing sheets** — **A4 landscape** **2D drawings**: link a part; **ortho** and **iso** views (orientation, integer **scale**, preview, drag; secondaries align to the primary). **H/V linear dimensions** (points, edges, Shift + parallel edges); **Delete** / **Backspace** / **Escape** for dims. View sidebar: **scale** and **delete** view. **Title block** + field sidebar; grid, zoom, pan (scroll, middle-drag, **Ctrl+scroll**). **PDF**, **DWG**, **SVG**.
+- **Documents** — **Home**: recent parts (thumbnails) and drawings; **New Part** / **New Drawing**; rename, **Save As**, **`.par`** / **`.drw`**, duplicate; parts: **STEP** & **STL** export.
 - **Local history** — **Commit** snapshots with messages and a **History** list to inspect and **restore** earlier states (browser-local, not a remote Git server).
 
 ## ✨ Stack
