@@ -263,33 +263,6 @@ function pickDimensionIdAt(
   return best?.id ?? null;
 }
 
-function pickStraightEdgeIndexAt(
-  segments: { a: THREE.Vector3; b: THREE.Vector3 }[],
-  cx: number,
-  cy: number,
-  camera: THREE.Camera,
-  w: number,
-  h: number,
-  dimensionMode: 'horizontal' | 'vertical',
-): number | null {
-  let bestI: number | null = null;
-  let bestD = HOVER_PX + 1;
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    const { ax, ay, bx, by } = projectSegmentToCanvas(seg.a, seg.b, camera, w, h);
-    const d = distToSeg2(cx, cy, ax, ay, bx, by);
-    if (d < bestD && d <= HOVER_PX) {
-      const ok =
-        dimensionMode === 'horizontal' ? isHorizontalInView(seg.a, seg.b) : isVerticalInView(seg.a, seg.b);
-      if (ok) {
-        bestD = d;
-        bestI = i;
-      }
-    }
-  }
-  return bestI;
-}
-
 function pickNearestVertexAt(
   vertices: THREE.Vector3[],
   cx: number,

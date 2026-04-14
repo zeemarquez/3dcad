@@ -109,7 +109,7 @@ export function LinkPartDialog({
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/40 p-4">
+    <div className="fixed inset-0 z-[5000] flex items-center justify-center bg-black/40 p-4">
       <div
         className="relative flex w-full max-w-4xl flex-col rounded-lg border border-zinc-300 bg-white shadow-xl max-h-[min(90vh,720px)]"
         role="dialog"

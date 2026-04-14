@@ -1,4 +1,5 @@
 import {
+  forwardRef,
   useCallback,
   useEffect,
   useRef,
@@ -7,17 +8,17 @@ import {
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { loadPartDocument } from '@/app/documentStore';
 import type { SolidMeshData } from '@/modules/part/kernel/cadEngine';
 import {
   useDrawingStore,
-  A4_WIDTH_MM,
-  A4_HEIGHT_MM,
   inferViewAlignment,
   type DrawingDimensionMode,
   type DrawingViewAlignment,
   type DrawingViewPlacement,
 } from '../store/useDrawingStore';
 import { DrawingOrthoPreview } from './DrawingOrthoPreview';
+import { DrawingTitleBlockSvg, TITLE_BLOCK_HEIGHT_MM, TITLE_BLOCK_WIDTH_MM } from './DrawingTitleBlockSvg';
 
 /** Older placements without heightMm used this factor on width. */
 const VIEW_HEIGHT_RATIO_LEGACY = 0.75;
@@ -35,6 +36,9 @@ function viewPlaneHalfExtentsMm(v: DrawingViewPlacement): { x: number; y: number
 }
 
 const BASE_PX_PER_MM = 2.8;
+
+/** Inset from sheet edges (mm) for the inner drawing frame and title block layout. */
+export const DRAWING_SHEET_MARGIN_MM = 6;
 
 /**
  * Extra CSS px around the letterboxed model area → widens the ortho frustum so linear dimensions
@@ -224,7 +228,10 @@ function DrawingSheetViewBox({
   );
 }
 
-export function DrawingSheet({ solids, loadingSolids }: { solids: SolidMeshData[] | null; loadingSolids: boolean }) {
+export const DrawingSheet = forwardRef<
+  HTMLDivElement,
+  { solids: SolidMeshData[] | null; loadingSolids: boolean }
+>(function DrawingSheet({ solids, loadingSolids }, ref) {
   const sheet = useDrawingStore((s) => s.sheet);
   const views = useDrawingStore((s) => s.views);
   const selectedViewId = useDrawingStore((s) => s.selectedViewId);
@@ -244,6 +251,9 @@ export function DrawingSheet({ solids, loadingSolids }: { solids: SolidMeshData[
   const removeDimension = useDrawingStore((s) => s.removeDimension);
   const hoveredDimensionId = useDrawingStore((s) => s.hoveredDimensionId);
   const setSelectedDimensionId = useDrawingStore((s) => s.setSelectedDimensionId);
+  const titleBlock = useDrawingStore((s) => s.titleBlock);
+  const setTitleBlockSidebarOpen = useDrawingStore((s) => s.setTitleBlockSidebarOpen);
+  const linkedPartMetaName = linkedPartId ? loadPartDocument(linkedPartId)?.meta.name : undefined;
 
   const pxPerMm = BASE_PX_PER_MM * sheetZoom;
   const sheetW = sheet.widthMm * pxPerMm;
@@ -509,7 +519,7 @@ export function DrawingSheet({ solids, loadingSolids }: { solids: SolidMeshData[
     }
   }, []);
 
-  const marginMm = 12;
+  const marginMm = DRAWING_SHEET_MARGIN_MM;
   const innerW = sheet.widthMm - marginMm * 2;
   const innerH = sheet.heightMm - marginMm * 2;
 
@@ -525,6 +535,8 @@ export function DrawingSheet({ solids, loadingSolids }: { solids: SolidMeshData[
       title="Scroll to pan · Ctrl+scroll or pinch to zoom · Middle-drag to pan"
     >
       <div
+        ref={ref}
+        data-drawing-sheet-export="true"
         className="relative overflow-visible shadow-lg"
         style={{
           position: 'absolute',
@@ -558,7 +570,14 @@ export function DrawingSheet({ solids, loadingSolids }: { solids: SolidMeshData[
               />
             </pattern>
           </defs>
-          {showSheetGrid && <rect width="100%" height="100%" fill="url(#drawingGrid)" />}
+          {showSheetGrid && (
+            <rect
+              className="drawing-sheet-grid-layer"
+              width="100%"
+              height="100%"
+              fill="url(#drawingGrid)"
+            />
+          )}
           <rect
             x={marginMm * pxPerMm}
             y={marginMm * pxPerMm}
@@ -707,13 +726,31 @@ export function DrawingSheet({ solids, loadingSolids }: { solids: SolidMeshData[
             </DrawingSheetViewBox>
           );
         })}
+
+        <div
+          className="absolute z-[600] cursor-pointer"
+          style={{
+            left: (marginMm + innerW - TITLE_BLOCK_WIDTH_MM) * pxPerMm,
+            top: (marginMm + innerH - TITLE_BLOCK_HEIGHT_MM) * pxPerMm,
+            width: TITLE_BLOCK_WIDTH_MM * pxPerMm,
+            height: TITLE_BLOCK_HEIGHT_MM * pxPerMm,
+          }}
+          onPointerDown={(e) => {
+            e.stopPropagation();
+            setSelectedViewId(null);
+            setTitleBlockSidebarOpen(true);
+          }}
+          title="Title block — click to edit field values"
+        >
+          <DrawingTitleBlockSvg pxPerMm={pxPerMm} doc={titleBlock} partName={linkedPartMetaName} />
+        </div>
       </div>
 
       {viewContextMenu &&
         createPortal(
           <div
             ref={viewContextMenuRef}
-            className="fixed z-[300] min-w-[160px] rounded-md border border-zinc-200 bg-white py-1 shadow-lg"
+            className="fixed z-[5100] min-w-[160px] rounded-md border border-zinc-200 bg-white py-1 shadow-lg"
             style={{
               left: Math.max(8, Math.min(viewContextMenu.x, (typeof window !== 'undefined' ? window.innerWidth : 9999) - 168)),
               top: Math.max(8, Math.min(viewContextMenu.y, (typeof window !== 'undefined' ? window.innerHeight : 9999) - 44)),
@@ -740,7 +777,7 @@ export function DrawingSheet({ solids, loadingSolids }: { solids: SolidMeshData[
         createPortal(
           <div
             ref={dimensionContextMenuRef}
-            className="fixed z-[301] min-w-[160px] rounded-md border border-zinc-200 bg-white py-1 shadow-lg"
+            className="fixed z-[5101] min-w-[160px] rounded-md border border-zinc-200 bg-white py-1 shadow-lg"
             style={{
               left: Math.max(
                 8,
@@ -776,4 +813,4 @@ export function DrawingSheet({ solids, loadingSolids }: { solids: SolidMeshData[
         )}
     </div>
   );
-}
+});

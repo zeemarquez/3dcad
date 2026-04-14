@@ -15,4 +15,5 @@ export type {
   DrawingViewAlignment,
   DrawingSheetDimension,
   DrawingDimensionMode,
+  DrawingTitleBlockDocument,
 } from './store/useDrawingStore';

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { X } from 'lucide-react';
+import { Trash2, X } from 'lucide-react';
 import { useDrawingStore, type DrawingViewPlacement } from '../store/useDrawingStore';
 
 const LEGACY_VIEW_HEIGHT_RATIO = 0.75;
@@ -25,9 +25,11 @@ function resolvedExtents(w: DrawingViewPlacement): { extX: number; extY: number;
 }
 
 export function DrawingViewPropertiesSidebar() {
+  const titleBlockSidebarOpen = useDrawingStore((s) => s.titleBlockSidebarOpen);
   const selectedViewId = useDrawingStore((s) => s.selectedViewId);
   const views = useDrawingStore((s) => s.views);
   const updateView = useDrawingStore((s) => s.updateView);
+  const removeView = useDrawingStore((s) => s.removeView);
   const setSelectedViewId = useDrawingStore((s) => s.setSelectedViewId);
   const setPlaceViewDialogScale = useDrawingStore((s) => s.setPlaceViewDialogScale);
 
@@ -44,7 +46,7 @@ export function DrawingViewPropertiesSidebar() {
     setScaleDenInput(String(den));
   }, [view?.id, view?.viewScaleNum, view?.viewScaleDen, view?.viewScale]);
 
-  if (!view) return null;
+  if (titleBlockSidebarOpen || !view) return null;
 
   const applyScaleFromInputs = () => {
     const newNum = parsePositiveInt(scaleNumInput, 1);
@@ -66,54 +68,67 @@ export function DrawingViewPropertiesSidebar() {
   };
 
   return (
-    <div className="z-20 flex h-full w-72 shrink-0 flex-col border-l border-zinc-300 bg-zinc-50">
-      <div className="flex shrink-0 items-center justify-between border-b border-zinc-300 bg-white p-3">
-        <h2 className="text-sm font-semibold text-zinc-900">View</h2>
-        <button
-          type="button"
-          onClick={() => setSelectedViewId(null)}
-          className="rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900"
-          aria-label="Close properties"
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </div>
+    <div className="absolute inset-y-0 right-0 z-30 flex w-72 flex-col border-l border-zinc-300 bg-zinc-50 shadow-xl">
+      <div className="flex h-full flex-col bg-zinc-50">
+        <div className="flex shrink-0 items-center justify-between border-b border-zinc-300 bg-white p-3">
+          <h2 className="text-sm font-semibold text-zinc-900">View</h2>
+          <button
+            type="button"
+            onClick={() => setSelectedViewId(null)}
+            className="rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900"
+            aria-label="Close properties"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
 
-      <div className="flex-1 overflow-y-auto p-4">
-        <div className="space-y-3">
-          <div>
-            <span className={labelCls}>Scale (drawing : model)</span>
-            <div className="flex flex-wrap items-center gap-2">
-              <input
-                id="drawing-view-scale-num"
-                inputMode="numeric"
-                value={scaleNumInput}
-                onChange={(e) => setScaleNumInput(e.target.value)}
-                onBlur={applyScaleFromInputs}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                }}
-                className={scaleInputClass}
-                aria-label="Scale numerator"
-              />
-              <span className="text-sm text-zinc-500">:</span>
-              <input
-                id="drawing-view-scale-den"
-                inputMode="numeric"
-                value={scaleDenInput}
-                onChange={(e) => setScaleDenInput(e.target.value)}
-                onBlur={applyScaleFromInputs}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
-                }}
-                className={scaleInputClass}
-                aria-label="Scale denominator"
-              />
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <div className="space-y-3">
+            <div>
+              <span className={labelCls}>Scale (drawing : model)</span>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  id="drawing-view-scale-num"
+                  inputMode="numeric"
+                  value={scaleNumInput}
+                  onChange={(e) => setScaleNumInput(e.target.value)}
+                  onBlur={applyScaleFromInputs}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                  }}
+                  className={scaleInputClass}
+                  aria-label="Scale numerator"
+                />
+                <span className="text-sm text-zinc-500">:</span>
+                <input
+                  id="drawing-view-scale-den"
+                  inputMode="numeric"
+                  value={scaleDenInput}
+                  onChange={(e) => setScaleDenInput(e.target.value)}
+                  onBlur={applyScaleFromInputs}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                  }}
+                  className={scaleInputClass}
+                  aria-label="Scale denominator"
+                />
+              </div>
+              <p className="mt-2 text-xs text-zinc-500">
+                Example 1 : 2 is half size on the sheet; 2 : 1 is double.
+              </p>
             </div>
-            <p className="mt-2 text-xs text-zinc-500">
-              Example 1 : 2 is half size on the sheet; 2 : 1 is double.
-            </p>
           </div>
+        </div>
+
+        <div className="shrink-0 border-t border-zinc-300 bg-white p-3">
+          <button
+            type="button"
+            onClick={() => removeView(view.id)}
+            className="flex w-full items-center justify-center gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm font-medium text-red-800 transition-colors hover:bg-red-100"
+          >
+            <Trash2 className="h-4 w-4 shrink-0" aria-hidden />
+            Delete view
+          </button>
         </div>
       </div>
     </div>

@@ -6,6 +6,7 @@ import { Sketcher2D } from '@/modules/part/sketch/Sketcher2D';
 import { TopBar } from '@/modules/part/toolbar/TopBar';
 import { ParametersDialog } from '@/modules/part/components/ParametersDialog';
 import { DrawingEditor } from '@/modules/drawing/components/DrawingEditor';
+import type { DrawingExportFormat } from '@/modules/drawing/components/DrawingDownloadFormatDialog';
 import { HomePage } from './HomePage';
 import {
   createDrawingDocumentMeta,
@@ -264,11 +265,41 @@ function App() {
     refreshRecents();
   };
 
-  const handleDownloadDrw = () => {
+  const handleExportDrawing = (format: DrawingExportFormat) => {
     if (!activeDrawingMeta) return;
+    if (format === 'pdf') return;
+
+    const base = sanitizeDrawingName(activeDrawingMeta.name);
     const payload = exportDrawingDocumentData(activeDrawingMeta);
-    const fileName = `${sanitizeDrawingName(activeDrawingMeta.name)}.drw`;
-    downloadBlob(JSON.stringify(payload, null, 2), fileName, 'application/json');
+    const json = JSON.stringify(payload, null, 2);
+
+    if (format === 'dwg') {
+      const content = [
+        'ModernCAD DWG export (placeholder — full binary DWG not implemented yet).',
+        'Embedded drawing document (.drw JSON) follows.',
+        '---BEGIN_JSON---',
+        json,
+        '---END_JSON---',
+      ].join('\n');
+      downloadBlob(content, `${base}.dwg`, 'application/acad');
+      return;
+    }
+
+    const w = payload.sheet.widthMm;
+    const h = payload.sheet.heightMm;
+    const safeJson = json.replace(/\]\]>/g, '] ]>');
+    const svg = [
+      '<?xml version="1.0" encoding="UTF-8"?>',
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${w}mm" height="${h}mm" viewBox="0 0 ${w} ${h}">`,
+      `  <title>${base.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</title>`,
+      '  <rect width="100%" height="100%" fill="#ffffff" stroke="#a1a1aa" stroke-width="0.25"/>',
+      `  <text x="${w / 2}" y="${h / 2}" text-anchor="middle" dominant-baseline="middle" font-family="system-ui,sans-serif" font-size="4" fill="#71717a">SVG vector export preview</text>`,
+      '  <metadata><![CDATA[',
+      safeJson,
+      '  ]]></metadata>',
+      '</svg>',
+    ].join('\n');
+    downloadBlob(svg, `${base}.svg`, 'image/svg+xml');
   };
 
   const handleExportStl = () => {
@@ -382,11 +413,12 @@ function App() {
   if (view === 'drawing') {
     return (
       <DrawingEditor
+        documentBaseName={activeDrawingMeta ? sanitizeDrawingName(activeDrawingMeta.name) : 'Drawing'}
         onHome={handleGoHome}
         fileActions={{
           onRenameDocument: handleRenameDrawing,
           onSaveAs: handleSaveAsDrawing,
-          onDownloadDrw: handleDownloadDrw,
+          onExportDrawing: handleExportDrawing,
           onCreateCopy: handleCreateCopyDrawing,
         }}
       />

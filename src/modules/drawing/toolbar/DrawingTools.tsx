@@ -1,4 +1,4 @@
-import { Box, LayoutTemplate, ArrowLeftRight, ArrowUpDown } from 'lucide-react';
+import { Box, LayoutTemplate, ArrowLeftRight, ArrowUpDown, PanelBottom } from 'lucide-react';
 import { ToolBtn, Sep } from '@/modules/part/toolbar/ToolBtn';
 import { useDrawingStore } from '../store/useDrawingStore';
 
@@ -7,11 +7,13 @@ export function DrawingTools({
   linkedPartName,
   onPlaceView,
   onPlaceIsoView,
+  onTitleBlock,
 }: {
   linkedPartId: string | null;
   linkedPartName?: string;
   onPlaceView: () => void;
   onPlaceIsoView: () => void;
+  onTitleBlock: () => void;
 }) {
   const drawingDimensionMode = useDrawingStore((s) => s.drawingDimensionMode);
   const setDrawingDimensionMode = useDrawingStore((s) => s.setDrawingDimensionMode);
@@ -31,6 +33,13 @@ export function DrawingTools({
         showLabel
         title="Insert an isometric orthographic view — free placement on the sheet"
         onClick={onPlaceIsoView}
+      />
+      <ToolBtn
+        icon={PanelBottom}
+        label="Title block"
+        showLabel
+        title="Edit title block layout, table, and cell text"
+        onClick={onTitleBlock}
       />
       <Sep />
       <ToolBtn

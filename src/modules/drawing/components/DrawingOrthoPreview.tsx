@@ -297,7 +297,12 @@ export function DrawingOrthoPreview({
       <Canvas
         orthographic
         dpr={[1, 2]}
-        gl={{ alpha: true, antialias: true, powerPreference: 'high-performance' }}
+        gl={{
+          alpha: true,
+          antialias: true,
+          powerPreference: 'high-performance',
+          preserveDrawingBuffer: true,
+        }}
         className="!absolute inset-0 h-full w-full"
         onCreated={({ gl, scene }) => {
           gl.setClearColor(0x000000, 0);

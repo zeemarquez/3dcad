@@ -1,4 +1,10 @@
 import { create } from 'zustand';
+import {
+  createDefaultTitleBlockDocument,
+  parseTitleBlockDocument,
+  type DrawingTitleBlockDocument,
+  type TitleBlockTableModel,
+} from '../titleBlock/titleBlockModel';
 
 /** A4 landscape (mm) — long edge horizontal */
 export const A4_WIDTH_MM = 297;
@@ -92,6 +98,12 @@ export interface DrawingSheetDimension {
 
 export type DrawingDimensionMode = null | 'horizontal' | 'vertical';
 
+export type { DrawingTitleBlockDocument, TitleBlockTableModel };
+export {
+  createDefaultTitleBlockDocument,
+  parseTitleBlockDocument,
+} from '../titleBlock/titleBlockModel';
+
 export interface DrawingDocumentData {
   kind: 'drawing';
   version: 1;
@@ -101,6 +113,8 @@ export interface DrawingDocumentData {
   sheet: { widthMm: number; heightMm: number };
   /** Optional; omitted in older files. */
   dimensions?: DrawingSheetDimension[];
+  /** Optional; omitted in older files. Legacy flat shape is migrated on import. */
+  titleBlock?: DrawingTitleBlockDocument | Record<string, unknown>;
 }
 
 interface DrawingState {
@@ -123,6 +137,12 @@ interface DrawingState {
   drawingDimensionMode: DrawingDimensionMode;
   setDrawingDimensionMode: (mode: DrawingDimensionMode) => void;
   dimensions: DrawingSheetDimension[];
+  titleBlock: DrawingTitleBlockDocument;
+  setTitleBlockFieldValues: (patch: Record<string, string>) => void;
+  setTitleBlockTable: (table: TitleBlockTableModel) => void;
+  setTitleBlockDoc: (doc: DrawingTitleBlockDocument) => void;
+  titleBlockSidebarOpen: boolean;
+  setTitleBlockSidebarOpen: (open: boolean) => void;
   /** Linear dimension selection / hover (ids are unique across views). */
   selectedDimensionId: string | null;
   hoveredDimensionId: string | null;
@@ -213,10 +233,25 @@ export const useDrawingStore = create<DrawingState>((set, get) => ({
   placeViewDialogScaleDen: 1,
   drawingDimensionMode: null,
   dimensions: [],
+  titleBlock: createDefaultTitleBlockDocument(),
+  titleBlockSidebarOpen: false,
   selectedDimensionId: null,
   hoveredDimensionId: null,
 
   setDrawingDimensionMode: (mode) => set({ drawingDimensionMode: mode }),
+  setTitleBlockFieldValues: (patch) =>
+    set((s) => ({
+      titleBlock: {
+        ...s.titleBlock,
+        fieldValues: { ...s.titleBlock.fieldValues, ...patch },
+      },
+    })),
+  setTitleBlockTable: (table) =>
+    set((s) => ({
+      titleBlock: { ...s.titleBlock, table },
+    })),
+  setTitleBlockDoc: (doc) => set({ titleBlock: doc }),
+  setTitleBlockSidebarOpen: (open) => set({ titleBlockSidebarOpen: open }),
   setSelectedDimensionId: (id) => set({ selectedDimensionId: id }),
   setHoveredDimensionId: (id) => set({ hoveredDimensionId: id }),
 
@@ -344,6 +379,7 @@ export const useDrawingStore = create<DrawingState>((set, get) => ({
       views: JSON.parse(JSON.stringify(s.views)) as DrawingViewPlacement[],
       sheet: { ...s.sheet },
       dimensions: JSON.parse(JSON.stringify(s.dimensions)) as DrawingSheetDimension[],
+      titleBlock: JSON.parse(JSON.stringify(s.titleBlock)) as DrawingTitleBlockDocument,
     };
   },
 
@@ -362,6 +398,7 @@ export const useDrawingStore = create<DrawingState>((set, get) => ({
             }),
           )
         : [];
+    const titleBlock = parseTitleBlockDocument(doc.titleBlock);
     set({
       linkedPartId: doc.linkedPartId ?? null,
       views,
@@ -370,6 +407,8 @@ export const useDrawingStore = create<DrawingState>((set, get) => ({
       sheetPan: { x: 0, y: 0 },
       sheetZoom: 1,
       dimensions,
+      titleBlock,
+      titleBlockSidebarOpen: false,
       drawingDimensionMode: null,
       selectedDimensionId: null,
       hoveredDimensionId: null,
@@ -386,6 +425,8 @@ export const useDrawingStore = create<DrawingState>((set, get) => ({
       sheetZoom: 1,
       sheetPan: { x: 0, y: 0 },
       dimensions: [],
+      titleBlock: createDefaultTitleBlockDocument(),
+      titleBlockSidebarOpen: false,
       drawingDimensionMode: null,
       selectedDimensionId: null,
       hoveredDimensionId: null,
