@@ -32,6 +32,7 @@ export const FeatureTree = () => {
     enterSketchMode,
     activeModule,
     deleteFeature,
+    getDependentFeatureIds,
     renameFeature,
     toggleFeatureEnabled,
     hiddenGeometryIds,
@@ -92,8 +93,20 @@ export const FeatureTree = () => {
 
   const handleDelete = () => {
     if (!contextMenu) return;
-    deleteFeature(contextMenu.featureId);
+    const { featureId } = contextMenu;
     setContextMenu(null);
+    const dependentIds = getDependentFeatureIds(featureId);
+    if (dependentIds.length > 0) {
+      const names = features
+        .filter((f) => dependentIds.includes(f.id))
+        .map((f) => f.name);
+      const preview = names.slice(0, 5).join(', ') + (names.length > 5 ? `, +${names.length - 5} more` : '');
+      const ok = window.confirm(
+        `Deleting this feature will also delete ${names.length} dependent feature${names.length === 1 ? '' : 's'}:\n${preview}\n\nContinue?`,
+      );
+      if (!ok) return;
+    }
+    deleteFeature(featureId);
   };
 
   const handleStartRename = () => {

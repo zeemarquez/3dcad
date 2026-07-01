@@ -311,6 +311,14 @@ const SolidMesh: React.FC<SolidMeshProps> = ({
   const edges = useMemo(() => buildEdgesFromMesh(solidData), [solidData]);
   const meshVertices = useMemo(() => buildVerticesFromEdges(edges), [edges]);
 
+  // Each rebuild produces a fresh set of face BufferGeometries; release the GPU buffers of the
+  // previous set (and on unmount) so a long modeling session doesn't leak VRAM until context loss.
+  useEffect(() => {
+    return () => {
+      for (const f of faces) f.geo.dispose();
+    };
+  }, [faces]);
+
   const preselectedRefs = activeInputOptions?.preselected;
   const preselectedEdgeIds = useMemo(() => {
     const ids = new Set<number>();
@@ -362,12 +370,6 @@ const SolidMesh: React.FC<SolidMeshProps> = ({
   const handleFaceSelect = useCallback(
     (face: BRepFace, hitPoint?: THREE.Vector3, ctrlKey = false) => {
       const ref = buildFaceSelectionRef(face, solidData.featureId, solidData.featureName, hitPoint);
-      console.log('[CAD][FaceSelect]', {
-        featureId: solidData.featureId,
-        featureName: solidData.featureName,
-        inSelectionMode,
-        ref,
-      });
       if (inSelectionMode) {
         captureGeometricSelection(ref, ctrlKey);
         setSelFaceId(face.groupId);
@@ -501,6 +503,7 @@ const CADSolids = () => {
   const activeCommand = useCadStore((s) => s.activeCommand);
   const transientPreviewFeature = useCadStore((s) => s.transientPreviewFeature);
   const setSolidResults = useCadStore((s) => s.setSolidResults);
+  const setMeshes = useCadStore((s) => s.setMeshes);
   const activeInputField = useCadStore((s) => s.activeInputField);
   const activeInputOptions = useCadStore((s) => s.activeInputOptions);
   const partViewportMode = usePartViewportMode();
@@ -529,6 +532,15 @@ const CADSolids = () => {
           geometryId: `${solid.featureId}:${index}`,
           featureId: solid.featureId,
           featureName: solid.featureName,
+        }))
+      );
+      // Mirror tessellated geometry into the store so exports (STL, …) have data to work with.
+      setMeshes(
+        result.map((solid, index) => ({
+          id: `${solid.featureId}:${index}`,
+          positions: solid.vertices,
+          normals: solid.normals,
+          indices: solid.triangles,
         }))
       );
 
@@ -567,10 +579,11 @@ const CADSolids = () => {
     } catch (e) {
       console.error('B-Rep build failed:', e);
       setSolidResults([]);
+      setMeshes([]);
       setBeforeSolids([]);
       setPreviewSolids([]);
     }
-  }, [cadReady, features, selectedFeatureId, activeCommand, transientPreviewFeature, setSolidResults, toFeatureInputs]);
+  }, [cadReady, features, selectedFeatureId, activeCommand, transientPreviewFeature, setSolidResults, setMeshes, toFeatureInputs]);
 
   if (!cadReady) return null;
 
@@ -915,6 +928,14 @@ const SketchWireframes = () => {
     }
     return results;
   }, [features, activeSketchId, hiddenGeometryIds]);
+
+  // Release the ShapeGeometry fills of the previous wireframe set (and on unmount).
+  useEffect(() => {
+    return () => {
+      for (const wf of wireframes) for (const g of wf.fills) g.dispose();
+    };
+  }, [wireframes]);
+
   return (
     <>
       {wireframes.map((wf) => (

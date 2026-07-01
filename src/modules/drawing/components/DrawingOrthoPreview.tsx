@@ -66,6 +66,8 @@ function OrthoAxisAlignedFit({
   );
 
   useLayoutEffect(() => {
+    /* eslint-disable react-hooks/immutability -- driving a three.js OrthographicCamera means
+       mutating it; this is the idiomatic R3F pattern and runs inside a layout effect. */
     if (!camera.isOrthographicCamera) return;
 
     const fx = fixedHalfExtentsMm?.x;
@@ -145,6 +147,7 @@ function OrthoAxisAlignedFit({
     camera.far = 10000;
     camera.zoom = 1;
     camera.updateProjectionMatrix();
+    /* eslint-enable react-hooks/immutability */
   }, [camera, solids, q, centroid, size.width, size.height, fixedHalfExtentsMm, canvasGutterPx]);
 
   return (

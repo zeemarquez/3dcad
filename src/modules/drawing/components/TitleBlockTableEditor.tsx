@@ -119,8 +119,12 @@ export function TitleBlockTableEditor({
     [setDoc],
   );
 
+  // Keep a live ref to the table for use inside pointer handlers without stale closures.
+  // Written in an effect (after commit) rather than during render, per the rules of refs.
   const tableRef = useRef(table);
-  tableRef.current = table;
+  useEffect(() => {
+    tableRef.current = table;
+  }, [table]);
 
   const onCellPointerDown = (e: React.PointerEvent, r: number, c: number) => {
     if ((e.target as HTMLElement).closest('[data-resize]')) return;
@@ -179,6 +183,7 @@ export function TitleBlockTableEditor({
 
   const [fontSizeStr, setFontSizeStr] = useState(String(firstCellFormat.fontSizeMm));
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- sync the font-size input to the selected cell(s)
     setFontSizeStr(String(firstCellFormat.fontSizeMm));
   }, [firstCellFormat.fontSizeMm]);
 

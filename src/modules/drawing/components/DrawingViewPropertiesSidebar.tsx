@@ -44,6 +44,8 @@ export function DrawingViewPropertiesSidebar() {
     const den = view.viewScaleDen ?? view.viewScale ?? 1;
     setScaleNumInput(String(num));
     setScaleDenInput(String(den));
+    // Keyed on the view's identity + scale fields on purpose; the full `view` object is not a dep.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view?.id, view?.viewScaleNum, view?.viewScaleDen, view?.viewScale]);
 
   if (titleBlockSidebarOpen || !view) return null;

@@ -837,14 +837,6 @@ function buildAccumShapes(features: FeatureInput[]): { shape: Shape3D; featureId
 
   for (const feat of features) {
     if (feat.type === "fillet" || feat.type === "chamfer") {
-      console.log("[CAD][BuildAccum][FeatureStart]", {
-        id: feat.id,
-        name: feat.name,
-        type: feat.type,
-        targetFeatureId: feat.targetFeatureId,
-        value: feat.value,
-        selectedEdgeCount: feat.selectedEdgeMidpoints.length,
-      });
       const targetIdx = accumShapes.findIndex((s) => s.featureId === feat.targetFeatureId);
       if (targetIdx < 0) continue;
       try {
@@ -915,21 +907,7 @@ function buildAccumShapes(features: FeatureInput[]): { shape: Shape3D; featureId
     }
     if (feat.type === "revolve" || feat.type === "revolveCut") {
       const rop = feat as RevolveFeatureInput;
-      console.log("[CAD][BuildAccum][FeatureStart]", {
-        id: rop.id,
-        name: rop.name,
-        type: rop.type,
-        plane: rop.plane,
-        planeOffset: rop.planeOffset,
-        angle: rop.angle,
-        axis: rop.axis,
-        startOffset: rop.startOffset,
-      });
       const toolSolids = sketchToRevolveSolids(rop);
-      console.log("[CAD][BuildAccum][ToolSolids]", {
-        featureId: rop.id,
-        count: toolSolids.length,
-      });
       if (toolSolids.length === 0) continue;
 
       if (feat.type === "revolveCut") {
@@ -983,22 +961,7 @@ function buildAccumShapes(features: FeatureInput[]): { shape: Shape3D; featureId
       continue;
     }
     const op = feat as SketchBooleanFeatureInput;
-    console.log("[CAD][BuildAccum][FeatureStart]", {
-      id: op.id,
-      name: op.name,
-      type: op.type,
-      plane: op.plane,
-      planeOffset: op.planeOffset,
-      height: op.height,
-      reverse: op.reverse,
-      symmetric: op.symmetric,
-      startOffset: op.startOffset,
-    });
     const toolSolids = sketchToSolids(op);
-    console.log("[CAD][BuildAccum][ToolSolids]", {
-      featureId: op.id,
-      count: toolSolids.length,
-    });
     if (toolSolids.length === 0) continue;
 
     if (op.type === "extrude") {
@@ -1014,11 +977,6 @@ function buildAccumShapes(features: FeatureInput[]): { shape: Shape3D; featureId
           const baseBox = shapeBBox(accumShapes[i].shape);
           if (!boxesTouchOrOverlap(baseBox, sBox)) continue;
           const ov = overlapVolume(baseBox, sBox);
-          console.log("[CAD][Extrude][FuseCandidate]", {
-            extrudeFeatureId: op.id,
-            candidateShapeIndex: i,
-            overlapVolume: ov,
-          });
           if (ov > bestOverlap) {
             bestOverlap = ov;
             bestIdx = i;
@@ -1027,20 +985,12 @@ function buildAccumShapes(features: FeatureInput[]): { shape: Shape3D; featureId
         if (bestIdx >= 0) {
           try {
             const fused = accumShapes[bestIdx].shape.fuse(s) as Shape3D;
-            console.log("[CAD][Extrude][FusePicked]", {
-              extrudeFeatureId: op.id,
-              targetShapeIndex: bestIdx,
-              overlapVolume: bestOverlap,
-            });
             accumShapes[bestIdx] = { shape: fused, featureId: op.id, featureName: op.name };
           } catch (e) {
             console.warn("CSG fuse failed, keeping separate body:", e);
             accumShapes.push({ shape: s, featureId: op.id, featureName: op.name });
           }
         } else {
-          console.log("[CAD][Extrude][NoFuseTarget]", {
-            extrudeFeatureId: op.id,
-          });
           accumShapes.push({ shape: s, featureId: op.id, featureName: op.name });
         }
       }

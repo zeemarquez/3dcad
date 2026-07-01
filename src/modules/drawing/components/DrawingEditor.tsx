@@ -69,11 +69,13 @@ export function DrawingEditor({
 
   useEffect(() => {
     if (linkedPartId || views.length > 0) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- prompt to link a part on first open of an empty drawing
     setLinkOpen(true);
   }, [linkedPartId, views.length]);
 
   useEffect(() => {
     if (!linkedPartId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear cached solids when no part is linked
       setSolids(null);
       return;
     }

@@ -356,8 +356,11 @@ export const DrawingSheet = forwardRef<
     }
     dragRef.current = null;
     window.removeEventListener('pointermove', onPointerMove);
+    /* eslint-disable react-hooks/immutability -- self-removing listener; endDrag is only
+       dereferenced when this closure runs, long after it is assigned (no real TDZ). */
     window.removeEventListener('pointerup', endDrag);
     window.removeEventListener('pointercancel', endDrag);
+    /* eslint-enable react-hooks/immutability */
   }, [onPointerMove]);
 
   const startDrag = useCallback(

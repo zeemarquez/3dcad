@@ -10,7 +10,6 @@ self.onmessage = async (event: MessageEvent) => {
     if (type === 'INIT') {
       if (!oc) {
         oc = await initOpenCascade({ locateFile: () => openCascadeWasm });
-        console.log('[OCCT] Worker initialized');
       }
       self.postMessage({ type: 'INIT_DONE', id });
     } else if (type === 'EVALUATE_FEATURE_TREE') {

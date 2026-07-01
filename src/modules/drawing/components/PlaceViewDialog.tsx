@@ -76,18 +76,22 @@ export function PlaceViewDialog({
 
   useEffect(() => {
     if (!open) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset view orientation each time the dialog opens
     setQ(variant === 'isometric' ? makeInitialIsometricQuaternion() : new THREE.Quaternion());
   }, [open, partId, variant]);
 
   useEffect(() => {
     if (!open) return;
     const { placeViewDialogScaleNum, placeViewDialogScaleDen } = useDrawingStore.getState();
+    /* eslint-disable react-hooks/set-state-in-effect -- seed the scale inputs from the store when the dialog opens */
     setScaleNumInput(String(placeViewDialogScaleNum));
     setScaleDenInput(String(placeViewDialogScaleDen));
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [open]);
 
   useEffect(() => {
     if (!open || !partId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear preview solids when closed or unlinked
       setSolids(null);
       return;
     }

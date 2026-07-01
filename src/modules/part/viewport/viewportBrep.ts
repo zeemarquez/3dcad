@@ -151,14 +151,6 @@ export function deriveAxisAlignedFaceRef(
   if (normal.lengthSq() < 1e-12) return { normal: new THREE.Vector3(0, 0, 1), faceOffset: 0 };
   normal.normalize();
   const faceOffset = normal.dot(p);
-  console.log('[CAD][FaceRef] exact', {
-    groupId: face.groupId,
-    faceId: face.faceId,
-    faceNormal: [face.normal.x, face.normal.y, face.normal.z],
-    normal: [normal.x, normal.y, normal.z],
-    hitPoint: [p.x, p.y, p.z],
-    faceOffset,
-  });
   return { normal, faceOffset };
 }
 

@@ -18,6 +18,7 @@ import {
   saveDrawingDocument,
   savePartDocument,
   setLastOpenedDocumentId,
+  StorageWriteError,
   type RecentDocumentEntry,
 } from './documentStore';
 import { useCadStore, type MeshData, type PartDocumentMeta } from '@/modules/part/store/useCadStore';
@@ -31,6 +32,20 @@ function sanitizeName(name: string): string {
 function sanitizeDrawingName(name: string): string {
   // eslint-disable-next-line no-control-regex
   return name.trim().replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_').replace(/\s+/g, ' ') || 'Untitled Drawing';
+}
+
+let lastStorageAlertAt = 0;
+/** Report a storage-write failure to the user, throttled so autosave can't spam alerts. */
+function notifyStorageError(err: unknown): void {
+  console.error('Document save failed:', err);
+  const now = Date.now();
+  if (now - lastStorageAlertAt < 30_000) return;
+  lastStorageAlertAt = now;
+  const message =
+    err instanceof StorageWriteError
+      ? err.message
+      : 'Could not save the document. Your latest changes may not be persisted.';
+  window.alert(message);
 }
 
 function downloadBlob(content: BlobPart, fileName: string, mimeType: string): void {
@@ -113,8 +128,13 @@ function App() {
     const updateUiState = opts?.updateUiState ?? true;
     const nextMeta = touchTimestamp ? { ...meta, updatedAt: Date.now() } : meta;
     const payload = exportPartDocumentData(nextMeta);
-    savePartDocument(payload);
-    setLastOpenedDocumentId(nextMeta.id, 'part');
+    try {
+      savePartDocument(payload);
+      setLastOpenedDocumentId(nextMeta.id, 'part');
+    } catch (err) {
+      notifyStorageError(err);
+      return;
+    }
     if (updateUiState) {
       setActivePartMeta(nextMeta);
       refreshRecents();
@@ -129,11 +149,27 @@ function App() {
     const updateUiState = opts?.updateUiState ?? true;
     const nextMeta = touchTimestamp ? { ...meta, updatedAt: Date.now() } : meta;
     const payload = exportDrawingDocumentData(nextMeta);
-    saveDrawingDocument(payload);
-    setLastOpenedDocumentId(nextMeta.id, 'drawing');
+    try {
+      saveDrawingDocument(payload);
+      setLastOpenedDocumentId(nextMeta.id, 'drawing');
+    } catch (err) {
+      notifyStorageError(err);
+      return;
+    }
     if (updateUiState) {
       setActiveDrawingMeta(nextMeta);
       refreshRecents();
+    }
+  };
+
+  /** Run a storage write, reporting failures to the user. Returns false if the write failed. */
+  const trySave = (save: () => void): boolean => {
+    try {
+      save();
+      return true;
+    } catch (err) {
+      notifyStorageError(err);
+      return false;
     }
   };
 
@@ -141,8 +177,10 @@ function App() {
     const meta = createPartDocumentMeta();
     resetDocument();
     const payload = exportPartDocumentData(meta);
-    savePartDocument(payload);
-    setLastOpenedDocumentId(meta.id, 'part');
+    if (!trySave(() => {
+      savePartDocument(payload);
+      setLastOpenedDocumentId(meta.id, 'part');
+    })) return;
     setActivePartMeta(meta);
     setActiveDrawingMeta(null);
     refreshRecents();
@@ -153,8 +191,10 @@ function App() {
     resetDrawing();
     const meta = createDrawingDocumentMeta();
     const payload = exportDrawingDocumentData(meta);
-    saveDrawingDocument(payload);
-    setLastOpenedDocumentId(meta.id, 'drawing');
+    if (!trySave(() => {
+      saveDrawingDocument(payload);
+      setLastOpenedDocumentId(meta.id, 'drawing');
+    })) return;
     setActiveDrawingMeta(meta);
     setActivePartMeta(null);
     refreshRecents();
@@ -210,8 +250,10 @@ function App() {
     const nextName = sanitizeName(next);
     const meta = createPartDocumentMeta(nextName);
     const payload = exportPartDocumentData(meta);
-    savePartDocument(payload);
-    setLastOpenedDocumentId(meta.id, 'part');
+    if (!trySave(() => {
+      savePartDocument(payload);
+      setLastOpenedDocumentId(meta.id, 'part');
+    })) return;
     setActivePartMeta(meta);
     refreshRecents();
   };
@@ -220,8 +262,10 @@ function App() {
     if (!activePartMeta) return;
     const meta = createPartDocumentMeta(`${activePartMeta.name} Copy`);
     const payload = exportPartDocumentData(meta);
-    savePartDocument(payload);
-    setLastOpenedDocumentId(meta.id, 'part');
+    if (!trySave(() => {
+      savePartDocument(payload);
+      setLastOpenedDocumentId(meta.id, 'part');
+    })) return;
     setActivePartMeta(meta);
     refreshRecents();
   };
@@ -249,8 +293,10 @@ function App() {
     const nextName = sanitizeDrawingName(next);
     const meta = createDrawingDocumentMeta(nextName);
     const payload = exportDrawingDocumentData(meta);
-    saveDrawingDocument(payload);
-    setLastOpenedDocumentId(meta.id, 'drawing');
+    if (!trySave(() => {
+      saveDrawingDocument(payload);
+      setLastOpenedDocumentId(meta.id, 'drawing');
+    })) return;
     setActiveDrawingMeta(meta);
     refreshRecents();
   };
@@ -259,8 +305,10 @@ function App() {
     if (!activeDrawingMeta) return;
     const meta = createDrawingDocumentMeta(`${activeDrawingMeta.name} Copy`);
     const payload = exportDrawingDocumentData(meta);
-    saveDrawingDocument(payload);
-    setLastOpenedDocumentId(meta.id, 'drawing');
+    if (!trySave(() => {
+      saveDrawingDocument(payload);
+      setLastOpenedDocumentId(meta.id, 'drawing');
+    })) return;
     setActiveDrawingMeta(meta);
     refreshRecents();
   };
@@ -330,7 +378,6 @@ function App() {
   };
 
   useEffect(() => {
-    /* eslint-disable react-hooks/set-state-in-effect -- one-time mount: refresh recents and restore last-opened doc */
     if (initializedRef.current) return;
     initializedRef.current = true;
     refreshRecents();
@@ -351,7 +398,6 @@ function App() {
     setActivePartMeta(lastDoc.meta);
     setActiveDrawingMeta(null);
     setView('part');
-    /* eslint-enable react-hooks/set-state-in-effect */
   }, [importPartDocumentData, importDrawingDocumentData]);
 
   useEffect(() => {
@@ -360,6 +406,9 @@ function App() {
       persistPartDocument(activePartMeta);
     }, 1200);
     return () => window.clearTimeout(timer);
+    // persistPartDocument is intentionally omitted: it is recreated each render and reads live
+    // store state; the debounce must key only on the document + edited snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, activePartMeta, editorSnapshot]);
 
   useEffect(() => {
@@ -368,6 +417,7 @@ function App() {
       persistDrawingDocument(activeDrawingMeta);
     }, 1200);
     return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- see note above; debounce keys on the snapshot
   }, [view, activeDrawingMeta, drawingSnapshot]);
 
   useEffect(() => {
@@ -382,6 +432,7 @@ function App() {
       window.removeEventListener('beforeunload', flush);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- flush reads live state; re-bind only on doc/snapshot change
   }, [view, activePartMeta, editorSnapshot]);
 
   useEffect(() => {
@@ -397,6 +448,7 @@ function App() {
       window.removeEventListener('beforeunload', flush);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- flush reads live state; re-bind only on doc/snapshot change
   }, [view, activeDrawingMeta, drawingSnapshot]);
 
   if (view === 'home') {

@@ -302,7 +302,9 @@ export interface PartDocumentData {
 
 interface CadState {
   features: Feature[];
+  /** Tessellated geometry of the currently-visible solids, mirrored from the viewport for export (STL, …). */
   meshes: MeshData[];
+  setMeshes: (meshes: MeshData[]) => void;
   solidResults: SolidResultItem[];
   setSolidResults: (items: SolidResultItem[]) => void;
   hiddenGeometryIds: string[];
@@ -311,6 +313,8 @@ interface CadState {
   addFeature: (feature: Feature) => void;
   updateFeatureParameter: (id: string, param: string, value: any) => void;
   evaluateFeatures: () => void;
+  /** Ids of features that (transitively) depend on `id` — i.e. would be cascade-deleted with it. */
+  getDependentFeatureIds: (id: string) => string[];
   deleteFeature: (id: string) => void;
   renameFeature: (id: string, name: string) => void;
   toggleFeatureEnabled: (id: string) => void;
@@ -401,6 +405,15 @@ const initialFeatures: Feature[] = [
 
 function cloneInitialFeatures(): Feature[] {
   return JSON.parse(JSON.stringify(initialFeatures)) as Feature[];
+}
+
+/**
+ * Unique, collision-free feature id. Feature ids are only ever compared as strings and
+ * used as key prefixes, so a UUID is safe. (Previously `f${Date.now()}`, which collided
+ * for features created within the same millisecond.)
+ */
+export function createFeatureId(): string {
+  return `f_${crypto.randomUUID()}`;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -807,14 +820,18 @@ export const useCadStore = create<CadState>((set, get) => {
   cadWorker.postMessage({ type: 'INIT', id: 'init' });
   cadWorker.onmessage = (event) => {
     const { type, payload } = event.data;
-    if (type === 'EVALUATE_DONE') {
+    // The worker is a placeholder for future OCCT precision operations and currently
+    // returns no geometry. Visible meshes are produced client-side by the viewport and
+    // pushed via `setMeshes`, so only adopt a non-empty worker payload to avoid clobbering.
+    if (type === 'EVALUATE_DONE' && Array.isArray(payload?.meshes) && payload.meshes.length > 0) {
       set({ meshes: payload.meshes });
     }
   };
 
   return {
-    features: initialFeatures,
+    features: cloneInitialFeatures(),
     meshes: [],
+    setMeshes: (meshes) => set({ meshes }),
     solidResults: [],
     setSolidResults: (items) => set({ solidResults: items }),
     hiddenGeometryIds: [],
@@ -865,12 +882,21 @@ export const useCadStore = create<CadState>((set, get) => {
       });
     },
 
+    getDependentFeatureIds: (id) => [...collectDependentFeatureIds(get().features, id)],
+
     deleteFeature: (id) => {
       set((state) => {
-        const nextFeatures = state.features.filter((f) => f.id !== id);
+        // Cascade: removing a feature must also remove everything that references it, otherwise
+        // the dependents keep dangling refs (e.g. a fillet whose target extrude is gone) which
+        // throw during rebuild and blank the whole model.
+        const toRemove = new Set<string>([id, ...collectDependentFeatureIds(state.features, id)]);
+        const nextFeatures = state.features.filter((f) => !toRemove.has(f.id));
+        const featureIdOfGeo = (geoId: string) =>
+          geoId.includes(':') ? geoId.slice(0, geoId.indexOf(':')) : geoId;
         return {
           features: nextFeatures,
           selectedFeatureId: null,
+          hiddenGeometryIds: state.hiddenGeometryIds.filter((h) => !toRemove.has(featureIdOfGeo(h))),
           dimensionParameters: buildDimensionParameters(nextFeatures, state.dimensionParameters),
         };
       });
@@ -941,15 +967,6 @@ export const useCadStore = create<CadState>((set, get) => {
           const latestSolid = [...state.features].reverse().find((f) => isSolidFeatureType(f.type));
           preselection = latestSolid?.id ?? null;
         }
-      }
-
-      if (command && ['extrude', 'cut', 'revolve', 'revolveCut', 'fillet', 'chamfer'].includes(command)) {
-        console.log('[CAD][SetActiveCommand]', {
-          command,
-          selectedFeatureId: state.selectedFeatureId,
-          selectedFeatureType: selectedFeature?.type ?? null,
-          commandPreselection: preselection,
-        });
       }
 
       set({ activeCommand: command, selectedFeatureId: null, commandPreselection: preselection });
@@ -1056,7 +1073,7 @@ export const useCadStore = create<CadState>((set, get) => {
     clearPendingCameraView: () => set({ pendingCameraView: null }),
 
     commits: [
-      { id: 'initial', message: 'Initial features', timestamp: Date.now(), features: initialFeatures },
+      { id: 'initial', message: 'Initial features', timestamp: Date.now(), features: cloneInitialFeatures() },
     ],
 
     commitChanges: (message) => {

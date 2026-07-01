@@ -39,6 +39,13 @@ Then open the URL Vite prints (usually `http://localhost:5173`).
 | `npm run preview` | Serve `dist` locally |
 | `npm run lint` | ESLint              |
 
+## 📚 Documentation
+
+- [`AGENTS.md`](AGENTS.md) — contributor & AI-agent guide (commands, conventions, gotchas)
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — module layout, data model, runtime flows
+- [`docs/CODE_REVIEW_FINDINGS.md`](docs/CODE_REVIEW_FINDINGS.md) — reviewed bugs (fixed + backlog)
+- [`CHANGELOG.md`](CHANGELOG.md) — notable changes
+
 ## 📁 Notes
 
 - **`assemble2d`** is pulled from GitHub (`tab58/assemble2d`); ensure network access on first install.

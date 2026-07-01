@@ -43,7 +43,7 @@ const ISO3098_LABEL_PERP_MM = TEXT_SCALE * 0.75;
 /** ISO 3098 Type B–style technical lettering (open “osifont”; ISONorm is a common commercial equivalent). */
 const DIMENSION_FONT_URL = '/fonts/osifont.ttf';
 
-export function buildWorldEdgeSegments(
+function buildWorldEdgeSegments(
   solids: SolidMeshData[],
   q: THREE.Quaternion,
   offset: THREE.Vector3,
@@ -620,9 +620,11 @@ export function DrawingOrthoDimensionLayer({
   }, [pendingEdgeIndex, segments]);
 
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect -- clear any in-progress dimension pick when the mode changes */
     setPendingVertex(null);
     setPendingEdgeIndex(null);
     setHoverSnapVertex(null);
+    /* eslint-enable react-hooks/set-state-in-effect */
   }, [dimensionMode]);
 
   useEffect(() => {

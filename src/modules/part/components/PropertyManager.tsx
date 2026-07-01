@@ -14,6 +14,7 @@ import {
   type Feature,
   type GeometricSelectionRef,
   type RevolveAxisSelection,
+  createFeatureId,
 } from '@/modules/part/store/useCadStore';
 import { X, MousePointer, ChevronsLeftRight, ArrowRightLeft } from 'lucide-react';
 import { PointRefInput } from './PointRefInput';
@@ -321,18 +322,12 @@ function geoRefToPlaneAndOffset(ref: GeometricSelectionRef | null): { plane: 'xy
     const [nx, ny, nz] = ref.normal;
     const ax = Math.abs(nx), ay = Math.abs(ny), az = Math.abs(nz);
     if (az >= ax && az >= ay) {
-      const result = { plane: 'xy', offset: ref.faceOffset * (nz >= 0 ? 1 : -1) } as const;
-      console.log('[CAD][SketchPlaneFromFace] dominant=Z', { normal: ref.normal, faceOffset: ref.faceOffset, result });
-      return result;
+      return { plane: 'xy', offset: ref.faceOffset * (nz >= 0 ? 1 : -1) } as const;
     }
     if (ay >= ax) {
-      const result = { plane: 'xz', offset: ref.faceOffset * (ny >= 0 ? 1 : -1) } as const;
-      console.log('[CAD][SketchPlaneFromFace] dominant=Y', { normal: ref.normal, faceOffset: ref.faceOffset, result });
-      return result;
+      return { plane: 'xz', offset: ref.faceOffset * (ny >= 0 ? 1 : -1) } as const;
     }
-    const result = { plane: 'yz', offset: ref.faceOffset * (nx >= 0 ? 1 : -1) } as const;
-    console.log('[CAD][SketchPlaneFromFace] dominant=X', { normal: ref.normal, faceOffset: ref.faceOffset, result });
-    return result;
+    return { plane: 'yz', offset: ref.faceOffset * (nx >= 0 ? 1 : -1) } as const;
   }
   return { plane: 'xy', offset: 0 };
 }
@@ -549,7 +544,7 @@ export const PropertyManager = () => {
       const { plane, offset } = geoRefToPlaneAndOffset(planeRef);
       const planeRefStored: SketchPlaneSelectionRef = isPlaneRef(planeRef) ? planeRef : planeToRef(plane);
       const planeOffset = planeRefStored.type === 'face' || planeRefStored.type === 'plane' ? 0 : offset;
-      const id = `f${Date.now()}`;
+      const id = createFeatureId();
       const name = `${formatCommandLabel('sketch')} ${state.features.length + 1}`;
       const feature: Feature = {
         id,
@@ -954,7 +949,7 @@ export const PropertyManager = () => {
       return n ?? Number.NaN;
     };
 
-    const id = `f${Date.now()}`;
+    const id = createFeatureId();
     const name = `${formatCommandLabel(activeCommand)} ${features.length + 1}`;
     let feature: Feature | null = null;
     const axisLineFromFeatureId = (axisFeatureId: string | null | undefined): { p: [number, number, number]; d: [number, number, number] } | null => {
@@ -1046,24 +1041,12 @@ export const PropertyManager = () => {
         // Face plane position is fully defined by planeRef (normal + faceOffset). Storing
         // geoRefToPlaneAndOffset's `offset` would duplicate that distance when rendering.
         const planeOffset = planeRef.type === 'face' || planeRef.type === 'plane' ? 0 : offset;
-        console.log('[CAD][CreateSketch]', {
-          sourceRef: planeRef,
-          resolvedPlane: plane,
-          resolvedOffset: planeOffset,
-        });
         feature = { id, name, type: 'sketch', parameters: { plane, planeOffset, planeRef } };
         break;
       }
       case 'extrude':
         {
           const sketchId = resolveSketchId(np.sketchId);
-          console.log('[CAD][ResolveSketchForFeature]', {
-            featureType: 'extrude',
-            candidate: np.sketchId ?? null,
-            commandPreselection,
-            preferredSketchId,
-            resolved: sketchId,
-          });
           const height = parseOrStop(String(np.height ?? 10));
           const startOffset = parseOrStop(String(np.startOffset ?? 0));
           if (!Number.isFinite(height) || !Number.isFinite(startOffset)) return;
@@ -1258,13 +1241,6 @@ export const PropertyManager = () => {
       case 'cut':
         {
           const sketchId = resolveSketchId(np.sketchId);
-          console.log('[CAD][ResolveSketchForFeature]', {
-            featureType: 'cut',
-            candidate: np.sketchId ?? null,
-            commandPreselection,
-            preferredSketchId,
-            resolved: sketchId,
-          });
           const depth = parseOrStop(String(np.depth ?? 10));
           const startOffset = parseOrStop(String(np.startOffset ?? 0));
           if (!Number.isFinite(depth) || !Number.isFinite(startOffset)) return;
@@ -1284,13 +1260,6 @@ export const PropertyManager = () => {
       case 'revolveCut':
         {
           const sketchId = resolveSketchId(np.sketchId);
-          console.log('[CAD][ResolveSketchForFeature]', {
-            featureType: activeCommand,
-            candidate: np.sketchId ?? null,
-            commandPreselection,
-            preferredSketchId,
-            resolved: sketchId,
-          });
           const angle = parseOrStop(String(np.angle ?? 360));
           const startOffset = parseOrStop(String(np.startOffset ?? 0));
           if (!Number.isFinite(angle) || !Number.isFinite(startOffset)) return;

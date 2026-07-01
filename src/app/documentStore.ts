@@ -22,6 +22,27 @@ interface DocsIndex {
 
 const emptyIndex = (): DocsIndex => ({ version: 1, docs: [] });
 
+/** Thrown when a document cannot be written to localStorage (quota exceeded, storage disabled, …). */
+export class StorageWriteError extends Error {
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message);
+    this.name = 'StorageWriteError';
+    if (options?.cause !== undefined) this.cause = options.cause;
+  }
+}
+
+/** Write to localStorage, converting any failure into a typed, user-actionable error. */
+function safeSetItem(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch (err) {
+    throw new StorageWriteError(
+      'Could not save — browser storage is full or unavailable. Free up space or export the document to a file.',
+      { cause: err },
+    );
+  }
+}
+
 function getDocStorageKey(id: string): string {
   return `moderncad.doc.${id}.v1`;
 }
@@ -47,7 +68,7 @@ function readIndex(): DocsIndex {
 }
 
 function writeIndex(index: DocsIndex): void {
-  localStorage.setItem(STORAGE_KEYS.index, JSON.stringify(index));
+  safeSetItem(STORAGE_KEYS.index, JSON.stringify(index));
 }
 
 export function createPartDocumentMeta(name?: string): PartDocumentMeta {
@@ -73,7 +94,7 @@ export function createDrawingDocumentMeta(name?: string): DrawingDocumentMeta {
 }
 
 export function savePartDocument(doc: PartDocumentData): void {
-  localStorage.setItem(getDocStorageKey(doc.meta.id), JSON.stringify(doc));
+  safeSetItem(getDocStorageKey(doc.meta.id), JSON.stringify(doc));
   const index = readIndex();
   const entry: RecentDocumentEntry = {
     id: doc.meta.id,
@@ -91,7 +112,7 @@ export function savePartDocument(doc: PartDocumentData): void {
 }
 
 export function saveDrawingDocument(doc: DrawingDocumentData): void {
-  localStorage.setItem(getDocStorageKey(doc.meta.id), JSON.stringify(doc));
+  safeSetItem(getDocStorageKey(doc.meta.id), JSON.stringify(doc));
   const index = readIndex();
   const entry: RecentDocumentEntry = {
     id: doc.meta.id,
@@ -146,7 +167,7 @@ export function setLastOpenedDocumentId(id: string | null, kind: 'part' | 'drawi
     localStorage.removeItem(STORAGE_KEYS.lastOpened);
     return;
   }
-  localStorage.setItem(STORAGE_KEYS.lastOpened, `${kind}:${id}`);
+  safeSetItem(STORAGE_KEYS.lastOpened, `${kind}:${id}`);
 }
 
 export function getLastOpenedDocumentId(): { kind: 'part' | 'drawing'; id: string } | null {

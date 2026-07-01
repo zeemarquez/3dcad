@@ -15,6 +15,7 @@ export function TitleBlockDialog({
   const [draft, setDraft] = useState<DrawingTitleBlockDocument>(storeDoc);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- seed an editable draft from the store when the dialog opens
     if (open) setDraft(JSON.parse(JSON.stringify(storeDoc)));
   }, [open, storeDoc]);
 
